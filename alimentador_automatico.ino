@@ -42,7 +42,7 @@ DallasTemperature sensors(&oneWire);
 
 // ================= CONFIGURACIÓN TÉRMICA =====================================
 float tempActual = 0.0f;
-const float SETPOINT = 30.0f;
+const float SETPOINT = 38.5f;
 const float BANDA_PID = 3.0f;
 const float HIST_TEMPERATURA = 0.5f;
 
