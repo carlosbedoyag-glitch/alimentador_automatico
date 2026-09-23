@@ -9,14 +9,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <DFRobotDFPlayerMini.h>
-
-// ========= CREDENCIALES Y CONFIGURACIÓN UBIDOTS =================
-const char *UBIDOTS_TOKEN = "BBUS-lxpcE0dKdQqOvJgttzol2yAjOK0a1V"; // Token de autenticación Ubidots
-const char *WIFI_SSID = "Red";                                     // SSID de la red Wi-Fi
-const char *WIFI_PASS = "Wi Fi";                                 // Contraseña de la red Wi-Fi
-const char *DEVICE_LABEL = "control-termico-esp32";                 // Etiqueta del dispositivo en la nube
-
-Ubidots ubidots(UBIDOTS_TOKEN);
+#include "secrets.h"
 
 // ================= RELÉS (Lógica Inversa) =================
 #define RELE_ON LOW   // Relés activos con nivel bajo
@@ -42,30 +35,29 @@ OneWire oneWire(ONE_WIRE_BUS);        // Instancia bus OneWire
 DallasTemperature sensors(&oneWire);  // Control del sensor térmico DS18B20
 
 // ================= VARIABLES DEL SISTEMA =================
-float tempActual = 0.0;
-float setpoint = 30.0;                 // Temperatura objetivo programada en °C
-
-const float BANDA_PID = 3.0;           // Rango de acción para iniciar PID (3°C antes del setpoint)
+float tempActual = 0.0F;
+float setpoint = 30.0F;                // Temperatura objetivo programada en °C
+const float BANDA_PID = 3.0F;          // Rango de acción para iniciar PID
+const float HISTERE = 0.5F;            // Histéresis para evitar oscilación del estado
 
 // Parámetros de sintonización PID
-float Kp = 40.0;
-float Ki = 0.2;
-float Kd = 8.0;
+float Kp = 40.0F;
+float Ki = 0.2F;
+float Kd = 8.0F;
 
-float errorAnterior = 0.0;
-float integral = 0.0;
-float pidOutput = 0.0;
+float errorAnterior = 0.0F;
+float integral = 0.0F;
+float pidOutput = 0.0F;
 
 // ================= TIEMPOS Y CONSTANTES (ms) =================
-const unsigned long VENTANA_PWM = 5000;         // Ventana del ciclo de trabajo PWM (5 segundos)
-const unsigned long REPETICION_LLAMADO = 60000;   // Intervalo entre llamadas de audio (1 minuto)
-const unsigned long DURACION_AUDIO = 30000;       // Duración de la reproducción de audio (30 segundos)
-const unsigned long INTERVALO_OLED = 250;        // Frecuencia de refresco de pantalla (250 ms)
+const unsigned long VENTANA_PWM = 5000UL;       // Ventana del ciclo de trabajo PWM (5 segundos)
+const unsigned long REPETICION_LLAMADO = 60000UL; // Intervalo entre llamadas de audio (1 minuto)
+const unsigned long DURACION_AUDIO = 30000UL;    // Duración de la reproducción de audio (30 segundos)
+const unsigned long INTERVALO_OLED = 250UL;      // Frecuencia de refresco de pantalla (250 ms)
 
-const unsigned long TIEMPO_VENT_ON = 60000;      // Tiempo encendido del agitador (1 minuto)
-const unsigned long TIEMPO_VENT_CICLO = 300000;  // Período total del ciclo del agitador (5 minutos)
-
-const unsigned long INTERVALO_UBIDOTS = 5000;    // Frecuencia de transmisión a la nube (5 segundos)
+const unsigned long TIEMPO_VENT_ON = 60000UL;     // Tiempo encendido del agitador (1 minuto)
+const unsigned long TIEMPO_VENT_CICLO = 300000UL;  // Período total del ciclo del agitador (5 minutos)
+const unsigned long INTERVALO_UBIDOTS = 5000UL;    // Frecuencia de transmisión a la nube (5 segundos)
 
 // ================= MARCAS DE TIEMPO (millis) =================
 unsigned long tiempoActual = 0;
@@ -81,12 +73,16 @@ unsigned long tiempoUltimoUbidots = 0;
 bool metaAlcanzada = false;
 bool reproduciendoAudio = false;
 bool modoPIDActivo = false;
+bool sensorValido = false;
+bool audioOK = false;
 
 // ================= DECLARACIÓN DE FUNCIONES =================
 void mostrarOLED(const char* estadoStr);
 void gestionarAudio();
 void calcularPID();
 void enviarDatosUbidots();
+bool actualizarTemperatura();
+void apagarTodo();
 
 // ======================================================
 // CONFIGURACIÓN INICIAL (SETUP)
@@ -124,11 +120,12 @@ void setup() {
   // Inicializar comunicación con DFPlayer Mini
   mp3Serial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
   if (mp3.begin(mp3Serial)) {
+    audioOK = true;
     mp3.volume(25);
     mp3.EQ(DFPLAYER_EQ_NORMAL);
   }
 
-  tiempoInicioVentilador = millis(); // Registrar marca inicial del temporizador
+  tiempoInicioVentilador = millis();
 }
 
 // ======================================================
@@ -146,21 +143,10 @@ void loop() {
   // ----------------------------------------------------
   // 1. EVALUACIÓN DEL SENSOR DE NIVEL (Seguridad)
   // ----------------------------------------------------
-  bool nivelOK = (digitalRead(NIVEL_PIN) == LOW); // LOW indica tanque con fluido
+  bool nivelOK = (digitalRead(NIVEL_PIN) == LOW);
 
   if (!nivelOK) {
-    // Apagar potencia si el nivel es bajo
-    digitalWrite(RELE_CALOR, RELE_OFF);
-    digitalWrite(RELE_VENT, RELE_OFF);
-
-    if (reproduciendoAudio) {
-      mp3.stop();
-      reproduciendoAudio = false;
-    }
-
-    metaAlcanzada = false;
-    modoPIDActivo = false;
-    integral = 0; // Limpiar acumulador integral PID
+    apagarTodo();
 
     if (tiempoActual - tiempoUltimoOLED >= INTERVALO_OLED) {
       tiempoUltimoOLED = tiempoActual;
@@ -172,14 +158,14 @@ void loop() {
       tiempoUltimoUbidots = tiempoActual;
     }
 
-    return; // Interrumpe la ejecución del bucle si no hay fluido suficiente
+    return;
   }
 
   // ----------------------------------------------------
   // 2. CONTROL CÍCLICO DEL AGITADOR/VENTILADOR
   // ----------------------------------------------------
   if (tiempoActual - tiempoInicioVentilador >= TIEMPO_VENT_CICLO) {
-    tiempoInicioVentilador = tiempoActual; // Reinicia ventana de 5 min
+    tiempoInicioVentilador = tiempoActual;
   }
 
   bool estadoVentilador = (tiempoActual - tiempoInicioVentilador < TIEMPO_VENT_ON);
@@ -188,32 +174,17 @@ void loop() {
   // ----------------------------------------------------
   // 3. LECTURA DE TEMPERATURA Y CÁLCULO PID
   // ----------------------------------------------------
-  if (tiempoActual - tiempoUltimaTemp >= 1000) { // Cada 1 segundo
-    float tempLeida = sensors.getTempCByIndex(0);
-
-    if (tempLeida > -10.0 && tempLeida < 85.0) { // Filtro de errores de bus
-      tempActual = tempLeida;
-    }
-
-    sensors.requestTemperatures(); // Solicitar próxima lectura
+  if (tiempoActual - tiempoUltimaTemp >= 1000UL) {
+    sensorValido = actualizarTemperatura();
     tiempoUltimaTemp = tiempoActual;
-
-    // Activar PID solo si está dentro del rango seguro (Setpoint - BANDA_PID)
-    if (tempActual >= (setpoint - BANDA_PID)) {
-      modoPIDActivo = true;
-      calcularPID();
-    } else {
-      modoPIDActivo = false;
-      integral = 0; // Desactivar PID y calentar a máxima potencia
-    }
   }
 
   // ----------------------------------------------------
-  // 4. LÓGICA DE CONTROL DE META TÉRMICA
+  // 4. LÓGICA DE CONTROL DE META TÉRMICA CON HISTÉRESIS
   // ----------------------------------------------------
-  if (tempActual >= setpoint) {
+  if (tempActual >= setpoint + HISTERE) {
     metaAlcanzada = true;
-  } else {
+  } else if (tempActual <= setpoint - HISTERE) {
     metaAlcanzada = false;
   }
 
@@ -225,17 +196,23 @@ void loop() {
   // ----------------------------------------------------
   // 6. CONTROL PWM DE LA RESISTENCIA CALEFACTORA
   // ----------------------------------------------------
-  if (metaAlcanzada) {
-    digitalWrite(RELE_CALOR, RELE_OFF); // Apagar si llegó a la temperatura final
+  if (!sensorValido) {
+    digitalWrite(RELE_CALOR, RELE_OFF);
+  } else if (metaAlcanzada) {
+    digitalWrite(RELE_CALOR, RELE_OFF);
   } else if (!modoPIDActivo) {
-    digitalWrite(RELE_CALOR, RELE_ON);  // Encendido continuo si está lejos de la meta
+    digitalWrite(RELE_CALOR, RELE_ON);
   } else {
-    // Control PWM continuo en ventana de tiempo suave
     if (tiempoActual - tiempoInicioPWM >= VENTANA_PWM) {
       tiempoInicioPWM = tiempoActual;
     }
 
-    bool estadoSSR = (pidOutput > (tiempoActual - tiempoInicioPWM));
+    float porcentaje = pidOutput / static_cast<float>(VENTANA_PWM);
+    porcentaje = constrain(porcentaje, 0.0F, 1.0F);
+
+    unsigned long tiempoActivo = static_cast<unsigned long>(porcentaje * VENTANA_PWM);
+    bool estadoSSR = ((tiempoActual - tiempoInicioPWM) < tiempoActivo);
+
     digitalWrite(RELE_CALOR, estadoSSR ? RELE_ON : RELE_OFF);
   }
 
@@ -253,7 +230,9 @@ void loop() {
   if (tiempoActual - tiempoUltimoOLED >= INTERVALO_OLED) {
     tiempoUltimoOLED = tiempoActual;
 
-    if (reproduciendoAudio) {
+    if (!sensorValido) {
+      mostrarOLED("ERROR TEMP");
+    } else if (reproduciendoAudio) {
       mostrarOLED("LLAMANDO LECHONES");
     } else if (metaAlcanzada) {
       mostrarOLED("TEMP OK");
@@ -266,17 +245,62 @@ void loop() {
 }
 
 // ======================================================
+// APAGADO DE SEGURIDAD
+// ======================================================
+void apagarTodo() {
+  digitalWrite(RELE_CALOR, RELE_OFF);
+  digitalWrite(RELE_VENT, RELE_OFF);
+  metaAlcanzada = false;
+  modoPIDActivo = false;
+  integral = 0.0F;
+
+  if (reproduciendoAudio && audioOK) {
+    mp3.stop();
+    reproduciendoAudio = false;
+  }
+}
+
+// ======================================================
+// ACTUALIZACIÓN Y VALIDACIÓN DEL SENSOR DE TEMPERATURA
+// ======================================================
+bool actualizarTemperatura() {
+  float tempLeida = sensors.getTempCByIndex(0);
+
+  if (tempLeida > -10.0F && tempLeida < 85.0F) {
+    tempActual = tempLeida;
+    sensorValido = true;
+  } else {
+    sensorValido = false;
+    tempActual = 0.0F;
+  }
+
+  sensors.requestTemperatures();
+
+  if (tempActual >= (setpoint - BANDA_PID)) {
+    modoPIDActivo = true;
+    calcularPID();
+  } else {
+    modoPIDActivo = false;
+    integral = 0.0F;
+    pidOutput = 0.0F;
+  }
+
+  return sensorValido;
+}
+
+// ======================================================
 // TRANSMISIÓN DE DATOS A LA NUBE (UBIDOTS)
 // ======================================================
 void enviarDatosUbidots() {
+  if (!ubidots.connected()) {
+    return;
+  }
+
   int estadoCalor = (digitalRead(RELE_CALOR) == RELE_ON) ? 1 : 0;
   int estadoVent = (digitalRead(RELE_VENT) == RELE_ON) ? 1 : 0;
   int estadoNivel = (digitalRead(NIVEL_PIN) == LOW) ? 1 : 0;
 
-  // Codificación del estado global del sistema:
-  // 0 = NIVEL BAJO, 1 = CALENTANDO, 2 = CONTROL PID, 3 = TEMP OK, 4 = LLAMANDO LECHONES
   int estadoGeneral;
-
   if (!estadoNivel) {
     estadoGeneral = 0;
   } else if (reproduciendoAudio) {
@@ -289,7 +313,6 @@ void enviarDatosUbidots() {
     estadoGeneral = 1;
   }
 
-  // Cargar variables a la pila de publicación MQTT
   ubidots.add("temperatura", tempActual);
   ubidots.add("setpoint", setpoint);
   ubidots.add("rele-calor", estadoCalor);
@@ -298,23 +321,26 @@ void enviarDatosUbidots() {
   ubidots.add("audio", reproduciendoAudio);
   ubidots.add("estado", estadoGeneral);
 
-  ubidots.publish(DEVICE_LABEL); // Publicar al broker MQTT
+  ubidots.publish(DEVICE_LABEL);
 }
 
 // ======================================================
 // REPRODUCCIÓN AUTOMÁTICA DE AUDIO
 // ======================================================
 void gestionarAudio() {
+  if (!audioOK) {
+    return;
+  }
+
   if (metaAlcanzada && !reproduciendoAudio && (tiempoActual - tiempoUltimoLlamado >= REPETICION_LLAMADO)) {
     tiempoUltimoLlamado = tiempoActual;
     tiempoInicioAudio = tiempoActual;
     reproduciendoAudio = true;
-
-    mp3.play(1); // Reproducir pista 0001.mp3 en la tarjeta MicroSD
+    mp3.play(1);
   }
 
   if (reproduciendoAudio && (tiempoActual - tiempoInicioAudio >= DURACION_AUDIO)) {
-    mp3.stop(); // Detener reproducción tras 30 segundos
+    mp3.stop();
     reproduciendoAudio = false;
   }
 }
@@ -350,23 +376,16 @@ void mostrarOLED(const char* estadoStr) {
 void calcularPID() {
   float error = setpoint - tempActual;
 
-  // Término Proporcional
   float P = Kp * error;
-
-  // Término Integral con limitador Anti-Windup (+/- 50)
   integral += error;
-  if (integral > 50) integral = 50;
-  if (integral < -50) integral = -50;
+  integral = constrain(integral, -50.0F, 50.0F);
   float I = Ki * integral;
 
-  // Término Derivativo
   float D = Kd * (error - errorAnterior);
   errorAnterior = error;
 
-  // Suma total y acotamiento del valor dentro del tiempo de la ventana PWM
   float salida = P + I + D;
-  if (salida > VENTANA_PWM) salida = VENTANA_PWM;
-  if (salida < 0) salida = 0;
+  salida = constrain(salida, 0.0F, static_cast<float>(VENTANA_PWM));
 
   pidOutput = salida;
 }
