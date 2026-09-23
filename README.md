@@ -6,7 +6,7 @@ Sistema de control térmico y alimentación porcina con ESP32, sensor DS18B20, r
 
 Este proyecto automatiza la temperatura de un sistema de crianza porcina mediante un calentador y un ventilador. El sistema:
 
-- mantiene una temperatura objetivo configurable,
+- mantiene una temperatura objetivo de **38.5 °C**,
 - activa control PID para estabilizar la temperatura,
 - controla un ventilador con ciclo periódico,
 - monitorea el nivel del agua,
@@ -46,7 +46,7 @@ Este proyecto automatiza la temperatura de un sistema de crianza porcina mediant
 ## Variables clave
 
 ```cpp
-const float SETPOINT = 38.5.0f;
+const float SETPOINT = 38.5f;
 const float BANDA_PID = 3.0f;
 const float HIST_TEMPERATURA = 0.5f;
 
@@ -54,6 +54,8 @@ const float Kp = 40.0f;
 const float Ki = 0.2f;
 const float Kd = 8.0f;
 ```
+
+El sistema alcanza la temperatura objetivo cuando el sensor registra **38.5 °C** o más. Después, el calentador se apaga y vuelve a activarse cuando la temperatura desciende hasta **38.0 °C**, debido a la histéresis configurada de 0.5 °C.
 
 ## Lógica del sistema
 
@@ -87,14 +89,14 @@ Esto evita un uso continuo excesivo y mejora la circulación del aire.
 
 ### 4. Control de temperatura
 
-Cuando la temperatura alcanza el setpoint:
+Cuando la temperatura alcanza el setpoint de **38.5 °C**:
 
 - `metaAlcanzada = true`,
 - el calentador se apaga,
 - el PID se reinicia,
 - la alarma de audio puede activarse cada cierto intervalo.
 
-Cuando la temperatura baja por debajo de la histéresis:
+Cuando la temperatura baja hasta **38.0 °C** o menos, debido a la histéresis de 0.5 °C:
 
 - `metaAlcanzada = false`,
 - el sistema vuelve a calentar.
@@ -107,7 +109,7 @@ El calentador usa un controlador PID para ajustar la potencia de calentamiento:
 - `Ki`: corrección integral,
 - `Kd`: corrección derivativa.
 
-Se aplica anti-windup para limitar la integral y evitar excesos de calentamiento.
+El control PID comienza cuando la temperatura está dentro de `BANDA_PID = 3.0 °C` del setpoint, es decir, desde **35.5 °C**. Se aplica anti-windup para limitar la integral y evitar excesos de calentamiento.
 
 ### 6. Alarma de audio
 
