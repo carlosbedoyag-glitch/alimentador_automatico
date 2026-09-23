@@ -46,7 +46,7 @@ Este proyecto automatiza la temperatura de un sistema de crianza porcina mediant
 ## Variables clave
 
 ```cpp
-const float SETPOINT = 30.0f;
+const float SETPOINT = 38.5.0f;
 const float BANDA_PID = 3.0f;
 const float HIST_TEMPERATURA = 0.5f;
 
@@ -133,7 +133,7 @@ INICIO
   Apagar calentador
   Apagar ventilador
 
-  SETPOINT = 30 °C
+  SETPOINT = 38.5 °C
   HISTÉRESIS = 0.5 °C
 
   REPETIR SIEMPRE:
