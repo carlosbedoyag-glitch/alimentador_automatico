@@ -50,7 +50,7 @@ constexpr uint8_t RELE_OFF = HIGH;
 
 // Pines.
 constexpr uint8_t ONE_WIRE_BUS = 4;
-constexpr uint8_t RELE_VENT = 26;
+constexpr uint8_t RELE_AGITADOR = 26;
 constexpr uint8_t RELE_CALOR = 25;
 constexpr uint8_t NIVEL_PIN = 32;
 constexpr uint8_t DFPLAYER_RX = 18;
@@ -101,6 +101,8 @@ constexpr unsigned long DURACION_AUDIO = 30000UL;
 constexpr unsigned long INTERVALO_OLED = 250UL;
 constexpr unsigned long INTERVALO_UBIDOTS = 5000UL;
 constexpr unsigned long TIMEOUT_RECONEXION = 10000UL;
+constexpr unsigned long PERIODO_AGITADOR = 60000UL;
+constexpr unsigned long DURACION_AGITADOR = 20000UL;
 
 unsigned long ahora = 0;
 unsigned long ultimaTemperatura = 0;
@@ -111,12 +113,14 @@ unsigned long ultimaOLED = 0;
 unsigned long ultimoUbidots = 0;
 unsigned long ultimoIntentoWiFi = 0;
 unsigned long ultimoPID = 0;
+unsigned long inicioCicloAgitador = 0;
 
 bool metaAlcanzada = false;
 bool reproduciendoAudio = false;
 bool modoPIDActivo = false;
 bool temperaturaValida = false;
 bool mp3Disponible = false;
+bool agitadorActivo = false;
 
 // ============================================================================
 // BLOQUE 7: PROTOTIPOS DE FUNCIONES
@@ -126,6 +130,7 @@ bool mp3Disponible = false;
 // ============================================================================
 void mostrarOLED();
 void gestionarAudio();
+void gestionarAgitador();
 void calcularPID();
 void reiniciarPID();
 void actualizarTemperatura();
@@ -147,7 +152,7 @@ void setup() {
   Wire.begin(21, 22);
 
   // Configuración de los relés como salidas y apagado inicial.
-  pinMode(RELE_VENT, OUTPUT);
+  pinMode(RELE_AGITADOR, OUTPUT);
   pinMode(RELE_CALOR, OUTPUT);
   pinMode(NIVEL_PIN, INPUT_PULLUP);
   apagarActuadores();
@@ -187,6 +192,8 @@ void setup() {
   ultimaTemperatura = ahora;
   ultimoPID = ahora;
   inicioPWM = ahora;
+  inicioCicloAgitador = ahora;
+  agitadorActivo = true;
 }
 
 // ============================================================================
@@ -222,8 +229,8 @@ void loop() {
     metaAlcanzada = false;
   }
 
-  // El ventilador/agitador funciona durante el calentamiento.
-  digitalWrite(RELE_VENT, metaAlcanzada ? RELE_OFF : RELE_ON);
+  // El agitador funciona en ciclo fijo cada minuto.
+  gestionarAgitador();
 
   // Lógica de audio de alerta cuando se alcanza la temperatura objetivo.
   gestionarAudio();
@@ -356,18 +363,40 @@ void reiniciarPID() {
 }
 
 // ============================================================================
-// BLOQUE 13: CONTROL DE ACTUADORES
+// BLOQUE 13: CONTROL DE AGITADOR
+// -----------------------------------------------------------------------------
+// El agitador funciona en un ciclo fijo de 20 s ON y 40 s OFF cada minuto.
+// Esto asegura mezcla constante sin depender del estado del calentador.
+// ============================================================================
+void gestionarAgitador() {
+  unsigned long tiempoCiclo = ahora - inicioCicloAgitador;
+
+  if (tiempoCiclo >= PERIODO_AGITADOR) {
+    inicioCicloAgitador = ahora;
+    tiempoCiclo = 0;
+    agitadorActivo = true;
+  }
+
+  if (agitadorActivo && tiempoCiclo >= DURACION_AGITADOR) {
+    agitadorActivo = false;
+  }
+
+  digitalWrite(RELE_AGITADOR, agitadorActivo ? RELE_ON : RELE_OFF);
+}
+
+// ============================================================================
+// BLOQUE 14: CONTROL DE ACTUADORES
 // -----------------------------------------------------------------------------
 // Apaga ambos relés en estado inicial o de emergencia, evitando arranques
 // accidentales al reiniciar el sistema.
 // ============================================================================
 void apagarActuadores() {
   digitalWrite(RELE_CALOR, RELE_OFF);
-  digitalWrite(RELE_VENT, RELE_OFF);
+  digitalWrite(RELE_AGITADOR, RELE_OFF);
 }
 
 // ============================================================================
-// BLOQUE 14: SEGURIDAD DEL SISTEMA
+// BLOQUE 15: SEGURIDAD DEL SISTEMA
 // -----------------------------------------------------------------------------
 // Si el nivel de agua es insuficiente o el sensor falla, se apagan los
 // actuadores y se detiene el audio para evitar daños.
@@ -376,6 +405,7 @@ void procesarSeguridad() {
   apagarActuadores();
   metaAlcanzada = false;
   modoPIDActivo = false;
+  agitadorActivo = false;
   if (digitalRead(NIVEL_PIN) != LOW) {
     temperaturaValida = false;
   }
@@ -393,7 +423,7 @@ void procesarSeguridad() {
 }
 
 // ============================================================================
-// BLOQUE 15: CONTROL DE AUDIO
+// BLOQUE 16: CONTROL DE AUDIO
 // -----------------------------------------------------------------------------
 // Reproduce una alerta sonora cuando la temperatura alcanza el objetivo y
 // detiene la reproducción después de cierto tiempo.
@@ -422,7 +452,7 @@ void gestionarAudio() {
 }
 
 // ============================================================================
-// BLOQUE 16: PUBLICACION A UBIDOTS
+// BLOQUE 17: PUBLICACION A UBIDOTS
 // -----------------------------------------------------------------------------
 // Envía el estado actual del sistema a Ubidots en un único lote para
 // reducir tráfico y mantener variables sincronizadas.
@@ -434,7 +464,7 @@ void enviarDatosUbidots() {
 
   const int nivel = digitalRead(NIVEL_PIN) == LOW ? 1 : 0;
   const int estadoCalor = digitalRead(RELE_CALOR) == RELE_ON ? 1 : 0;
-  const int estadoVent = digitalRead(RELE_VENT) == RELE_ON ? 1 : 0;
+  const int estadoAgitador = digitalRead(RELE_AGITADOR) == RELE_ON ? 1 : 0;
   int estado = 0;
 
   if (nivel) {
@@ -449,7 +479,7 @@ void enviarDatosUbidots() {
   ubidots.add("temperatura", tempActual);
   ubidots.add("setpoint", SETPOINT);
   ubidots.add("rele-calor", estadoCalor);
-  ubidots.add("rele-ventilador", estadoVent);
+  ubidots.add("rele-agitador", estadoAgitador);
   ubidots.add("nivel-agua", nivel);
   ubidots.add("temperatura-valida", temperaturaValida ? 1 : 0);
   ubidots.add("audio", reproduciendoAudio ? 1 : 0);
@@ -458,7 +488,7 @@ void enviarDatosUbidots() {
 }
 
 // ============================================================================
-// BLOQUE 17: VISUALIZACION EN OLED
+// BLOQUE 18: VISUALIZACION EN OLED
 // -----------------------------------------------------------------------------
 // Muestra de forma legible el estado del sistema, temperatura, nivel de agua,
 // relés y WiFi en la pantalla pequeña.
@@ -469,7 +499,7 @@ void mostrarOLED() {
 
   const bool nivelOK = digitalRead(NIVEL_PIN) == LOW;
   const bool wifiOK = WiFi.status() == WL_CONNECTED;
-  const bool ventON = digitalRead(RELE_VENT) == RELE_ON;
+  const bool agitadorON = digitalRead(RELE_AGITADOR) == RELE_ON;
   const bool calorON = digitalRead(RELE_CALOR) == RELE_ON;
   char buf[35];
 
@@ -492,7 +522,7 @@ void mostrarOLED() {
 
   snprintf(buf, sizeof(buf), "NIVEL: %s", nivelOK ? "OK" : "BAJO");
   u8g2.drawStr(0, 42, buf);
-  snprintf(buf, sizeof(buf), "CALOR:%s VENT:%s", calorON ? "ON" : "OFF", ventON ? "ON" : "OFF");
+  snprintf(buf, sizeof(buf), "CALOR:%s AGIT:%s", calorON ? "ON" : "OFF", agitadorON ? "ON" : "OFF");
   u8g2.drawStr(0, 52, buf);
   snprintf(buf, sizeof(buf), "WIFI: %s", wifiOK ? "OK" : "OFF");
   u8g2.drawStr(0, 62, buf);
