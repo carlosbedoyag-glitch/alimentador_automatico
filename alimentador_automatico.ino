@@ -23,15 +23,13 @@
 // BLOQUE 2: CONFIGURACION GENERAL DEL SISTEMA
 // -----------------------------------------------------------------------------
 // Aquí se definen los parámetros de red, nombre del dispositivo y el modo de
-// operación del sensor. Los valores reales de WiFi y token deben mantenerse
-// fuera del repositorio por seguridad.
+// operación del sensor.
 // ============================================================================
 
 // Dejar en false cuando se conecte el DS18B20 real.
 #define SIMULAR_SENSOR false
 
-// No guardes credenciales reales en el repositorio. Usa un archivo local o
-// reemplaza estos valores solo en tu copia antes de cargar el programa.
+// Parámetros de conexión WiFi y Ubidots.
 const char *UBIDOTS_TOKEN = "TU_TOKEN_UBIDOTS";
 const char *WIFI_SSID = "TU_RED_WIFI";
 const char *WIFI_PASS = "TU_CONTRASENA_WIFI";
