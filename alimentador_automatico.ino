@@ -1,8 +1,10 @@
 // ============================================================================
 // SISTEMA DE CONTROL TERMICO Y ALIMENTACION PORCINA CON UBIDOTS
+// ESP32 + Ubidots MQTT + OLED SH1106 + DS18B20 + DFPlayer Mini
 // ============================================================================
 
 #include <Arduino.h>
+#include <WiFi.h>
 #include <UbidotsEsp32Mqtt.h>
 #include <U8g2lib.h>
 #include <Wire.h>
@@ -10,8 +12,14 @@
 #include <DallasTemperature.h>
 #include <DFRobotDFPlayerMini.h>
 
-// ================= CREDENCIALES =============================================
-// Reemplaza estos valores localmente. No publiques credenciales reales.
+// ============================================================================
+// CONFIGURACION
+// ============================================================================
+// Dejar en false cuando se conecte el DS18B20 real.
+#define SIMULAR_SENSOR false
+
+// No guardes credenciales reales en el repositorio. Usa un archivo local o
+// reemplaza estos valores solo en tu copia antes de cargar el programa.
 const char *UBIDOTS_TOKEN = "TU_TOKEN_UBIDOTS";
 const char *WIFI_SSID = "TU_RED_WIFI";
 const char *WIFI_PASS = "TU_CONTRASENA_WIFI";
@@ -19,62 +27,61 @@ const char *DEVICE_LABEL = "control-termico-esp32";
 
 Ubidots ubidots(UBIDOTS_TOKEN);
 
-// ================= RELÉS (LÓGICA INVERSA) ====================================
-#define RELE_ON LOW
-#define RELE_OFF HIGH
+// Relés activos en LOW.
+constexpr uint8_t RELE_ON = LOW;
+constexpr uint8_t RELE_OFF = HIGH;
 
-// ================= OLED SH1106 ===============================================
+// Pines.
+constexpr uint8_t ONE_WIRE_BUS = 4;
+constexpr uint8_t RELE_VENT = 26;
+constexpr uint8_t RELE_CALOR = 25;
+constexpr uint8_t NIVEL_PIN = 32;
+constexpr uint8_t DFPLAYER_RX = 18;
+constexpr uint8_t DFPLAYER_TX = 19;
+
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
-
-// ================= PINES =====================================================
-#define ONE_WIRE_BUS 4
-#define RELE_VENT 26
-#define RELE_CALOR 25
-#define NIVEL_PIN 32
-#define DFPLAYER_RX 18
-#define DFPLAYER_TX 19
-
-// ================= HARDWARE ==================================================
 HardwareSerial mp3Serial(2);
 DFRobotDFPlayerMini mp3;
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-// ================= CONFIGURACIÓN TÉRMICA =====================================
+// ============================================================================
+// CONTROL TERMICO
+// ============================================================================
+constexpr float SETPOINT = 38.5f;
+constexpr float BANDA_PID = 3.0f;
+constexpr float HIST_TEMPERATURA = 0.5f;
+constexpr float KP = 40.0f;
+constexpr float KI = 0.2f;
+constexpr float KD = 8.0f;
+constexpr float INTEGRAL_MIN = -50.0f;
+constexpr float INTEGRAL_MAX = 50.0f;
+
 float tempActual = 0.0f;
-const float SETPOINT = 38.5f;
-const float BANDA_PID = 3.0f;
-const float HIST_TEMPERATURA = 0.5f;
-
-// Kp: ms/°C, Ki: ms/(°C*s), Kd: ms/(°C/s). Ajustar con pruebas reales.
-const float Kp = 40.0f;
-const float Ki = 0.2f;
-const float Kd = 8.0f;
-
 float errorAnterior = 0.0f;
 float integral = 0.0f;
 float pidOutput = 0.0f;
-unsigned long tiempoPIDAnterior = 0;
 
-// ================= INTERVALOS =================================================
-const unsigned long VENTANA_PWM = 5000UL;
-const unsigned long INTERVALO_TEMP = 1000UL;
-const unsigned long REPETICION_LLAMADO = 60000UL;
-const unsigned long DURACION_AUDIO = 30000UL;
-const unsigned long INTERVALO_OLED = 250UL;
-const unsigned long TIEMPO_VENT_ON = 60000UL;
-const unsigned long TIEMPO_VENT_CICLO = 300000UL;
-const unsigned long INTERVALO_UBIDOTS = 5000UL;
+// ============================================================================
+// INTERVALOS
+// ============================================================================
+constexpr unsigned long VENTANA_PWM = 5000UL;
+constexpr unsigned long INTERVALO_TEMP = 800UL;
+constexpr unsigned long REPETICION_LLAMADO = 60000UL;
+constexpr unsigned long DURACION_AUDIO = 30000UL;
+constexpr unsigned long INTERVALO_OLED = 250UL;
+constexpr unsigned long INTERVALO_UBIDOTS = 5000UL;
+constexpr unsigned long TIMEOUT_RECONEXION = 10000UL;
 
-// ================= ESTADO ====================================================
-unsigned long tiempoActual = 0;
-unsigned long tiempoUltimaTemp = 0;
-unsigned long tiempoInicioPWM = 0;
-unsigned long tiempoUltimoLlamado = 0;
-unsigned long tiempoInicioAudio = 0;
-unsigned long tiempoUltimoOLED = 0;
-unsigned long tiempoInicioVentilador = 0;
-unsigned long tiempoUltimoUbidots = 0;
+unsigned long ahora = 0;
+unsigned long ultimaTemperatura = 0;
+unsigned long inicioPWM = 0;
+unsigned long ultimoLlamado = 0;
+unsigned long inicioAudio = 0;
+unsigned long ultimaOLED = 0;
+unsigned long ultimoUbidots = 0;
+unsigned long ultimoIntentoWiFi = 0;
+unsigned long ultimoPID = 0;
 
 bool metaAlcanzada = false;
 bool reproduciendoAudio = false;
@@ -82,162 +89,151 @@ bool modoPIDActivo = false;
 bool temperaturaValida = false;
 bool mp3Disponible = false;
 
-void mostrarOLED(const char *estadoStr);
+void mostrarOLED();
 void gestionarAudio();
 void calcularPID();
 void reiniciarPID();
 void actualizarTemperatura();
 void apagarActuadores();
+void procesarSeguridad();
 void enviarDatosUbidots();
+void actualizarComunicaciones();
+void detenerAudio();
 
 void setup() {
   Serial.begin(115200);
+  delay(100);
   Wire.begin(21, 22);
 
   pinMode(RELE_VENT, OUTPUT);
   pinMode(RELE_CALOR, OUTPUT);
-  digitalWrite(RELE_VENT, RELE_OFF);
-  digitalWrite(RELE_CALOR, RELE_OFF);
-
   pinMode(NIVEL_PIN, INPUT_PULLUP);
+  apagarActuadores();
 
   u8g2.begin();
-  u8g2.setFont(u8g2_font_6x10_tf);
+  u8g2.setFont(u8g2_font_5x7_tf);
   u8g2.clearBuffer();
   u8g2.drawStr(0, 15, "Control Termico");
   u8g2.drawStr(0, 35, "Iniciando...");
   u8g2.sendBuffer();
 
+#if !SIMULAR_SENSOR
   sensors.begin();
   sensors.setWaitForConversion(false);
   sensors.requestTemperatures();
-  tiempoUltimaTemp = millis();
+#endif
 
   mp3Serial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
-  mp3Disponible = mp3.begin(mp3Serial);
+  mp3Disponible = mp3.begin(mp3Serial, true, false);
   if (mp3Disponible) {
     mp3.volume(25);
     mp3.EQ(DFPLAYER_EQ_NORMAL);
+  } else {
+    Serial.println("DFPlayer no disponible; se continua sin audio.");
   }
 
-  ubidots.connectToWifi(WIFI_SSID, WIFI_PASS);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
   ubidots.setup();
 
-  tiempoInicioVentilador = millis();
-  tiempoPIDAnterior = millis();
+  ahora = millis();
+  ultimaTemperatura = ahora;
+  ultimoPID = ahora;
+  inicioPWM = ahora;
 }
 
 void loop() {
-  tiempoActual = millis();
+  ahora = millis();
+  actualizarComunicaciones();
 
-  // La conectividad es secundaria; las protecciones se evalúan localmente.
-  if (!ubidots.connected()) {
-    ubidots.reconnect();
-  }
-  ubidots.loop();
-
-  const bool nivelOK = digitalRead(NIVEL_PIN) == LOW;
-  if (!nivelOK) {
-    apagarActuadores();
-    metaAlcanzada = false;
-    temperaturaValida = false;
-    reiniciarPID();
-
-    if (reproduciendoAudio && mp3Disponible) {
-      mp3.stop();
-    }
-    reproduciendoAudio = false;
-
-    if (tiempoActual - tiempoUltimoOLED >= INTERVALO_OLED) {
-      tiempoUltimoOLED = tiempoActual;
-      mostrarOLED("NIVEL BAJO");
-    }
-    if (tiempoActual - tiempoUltimoUbidots >= INTERVALO_UBIDOTS) {
-      tiempoUltimoUbidots = tiempoActual;
-      enviarDatosUbidots();
-    }
+  // Las protecciones siempre se ejecutan localmente, aunque no haya WiFi.
+  if (digitalRead(NIVEL_PIN) != LOW) {
+    procesarSeguridad();
     return;
   }
 
   actualizarTemperatura();
-
-  // Nunca se calienta sin una lectura válida del sensor.
   if (!temperaturaValida) {
-    apagarActuadores();
-    metaAlcanzada = false;
-    reiniciarPID();
-
-    if (tiempoActual - tiempoUltimoOLED >= INTERVALO_OLED) {
-      tiempoUltimoOLED = tiempoActual;
-      mostrarOLED("ERROR SENSOR");
-    }
-    if (tiempoActual - tiempoUltimoUbidots >= INTERVALO_UBIDOTS) {
-      tiempoUltimoUbidots = tiempoActual;
-      enviarDatosUbidots();
-    }
+    procesarSeguridad();
     return;
   }
 
-  // Agitador cíclico.
-  if (tiempoActual - tiempoInicioVentilador >= TIEMPO_VENT_CICLO) {
-    tiempoInicioVentilador = tiempoActual;
-  }
-  const bool estadoVentilador =
-      tiempoActual - tiempoInicioVentilador < TIEMPO_VENT_ON;
-  digitalWrite(RELE_VENT, estadoVentilador ? RELE_ON : RELE_OFF);
-
-  // Histéresis: se alcanza el objetivo en SETPOINT y se abandona por debajo.
+  // Histéresis para evitar conmutaciones alrededor del setpoint.
   if (!metaAlcanzada && tempActual >= SETPOINT) {
     metaAlcanzada = true;
   } else if (metaAlcanzada && tempActual <= SETPOINT - HIST_TEMPERATURA) {
     metaAlcanzada = false;
   }
 
+  // El ventilador/agitador funciona durante el calentamiento.
+  digitalWrite(RELE_VENT, metaAlcanzada ? RELE_OFF : RELE_ON);
   gestionarAudio();
 
   if (metaAlcanzada) {
     digitalWrite(RELE_CALOR, RELE_OFF);
     reiniciarPID();
   } else if (!modoPIDActivo) {
+    // Calentamiento completo mientras se esta lejos del setpoint.
     digitalWrite(RELE_CALOR, RELE_ON);
   } else {
-    if (tiempoActual - tiempoInicioPWM >= VENTANA_PWM) {
-      tiempoInicioPWM = tiempoActual;
+    if (ahora - inicioPWM >= VENTANA_PWM) {
+      inicioPWM = ahora;
     }
-    const bool calefactorON = pidOutput > (tiempoActual - tiempoInicioPWM);
+    const bool calefactorON = pidOutput > (ahora - inicioPWM);
     digitalWrite(RELE_CALOR, calefactorON ? RELE_ON : RELE_OFF);
   }
 
-  if (tiempoActual - tiempoUltimoUbidots >= INTERVALO_UBIDOTS) {
-    tiempoUltimoUbidots = tiempoActual;
+  if (ahora - ultimoUbidots >= INTERVALO_UBIDOTS) {
+    ultimoUbidots = ahora;
     enviarDatosUbidots();
   }
-
-  if (tiempoActual - tiempoUltimoOLED >= INTERVALO_OLED) {
-    tiempoUltimoOLED = tiempoActual;
-    if (reproduciendoAudio) {
-      mostrarOLED("LLAMANDO LECHONES");
-    } else if (metaAlcanzada) {
-      mostrarOLED("TEMP OK");
-    } else if (modoPIDActivo) {
-      mostrarOLED("CONTROL PID");
-    } else {
-      mostrarOLED("CALENTANDO");
-    }
+  if (ahora - ultimaOLED >= INTERVALO_OLED) {
+    ultimaOLED = ahora;
+    mostrarOLED();
   }
 }
 
-void actualizarTemperatura() {
-  if (tiempoActual - tiempoUltimaTemp < INTERVALO_TEMP) {
+void actualizarComunicaciones() {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (ahora - ultimoIntentoWiFi >= TIMEOUT_RECONEXION) {
+      ultimoIntentoWiFi = ahora;
+      Serial.println("Intentando reconectar WiFi...");
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+    }
     return;
   }
 
-  const float tempLeida = sensors.getTempCByIndex(0);
-  temperaturaValida = tempLeida != DEVICE_DISCONNECTED_C &&
-                      tempLeida > -10.0f && tempLeida < 85.0f;
+  if (!ubidots.connected()) {
+    ubidots.reconnect();
+  }
+  ubidots.loop();
+}
+
+void actualizarTemperatura() {
+  if (ahora - ultimaTemperatura < INTERVALO_TEMP) {
+    return;
+  }
+
+#if SIMULAR_SENSOR
+  temperaturaValida = true;
+  // Simulacion simple para pruebas de pantalla y actuadores.
+  tempActual += metaAlcanzada ? -0.1f : 0.4f;
+  if (tempActual > 42.0f) {
+    tempActual = 20.0f;
+    metaAlcanzada = false;
+  }
+#else
+  const float leida = sensors.getTempCByIndex(0);
+  temperaturaValida = leida != DEVICE_DISCONNECTED_C &&
+                      leida > -10.0f && leida < 85.0f;
+  if (temperaturaValida) {
+    tempActual = leida;
+  }
+  sensors.requestTemperatures();
+#endif
 
   if (temperaturaValida) {
-    tempActual = tempLeida;
     if (tempActual >= SETPOINT - BANDA_PID) {
       modoPIDActivo = true;
       calcularPID();
@@ -248,37 +244,32 @@ void actualizarTemperatura() {
   } else {
     modoPIDActivo = false;
     reiniciarPID();
+    Serial.println("Lectura DS18B20 invalida.");
   }
-
-  sensors.requestTemperatures();
-  tiempoUltimaTemp = tiempoActual;
+  ultimaTemperatura = ahora;
 }
 
 void calcularPID() {
-  const unsigned long ahora = tiempoActual;
-  float dt = (ahora - tiempoPIDAnterior) / 1000.0f;
+  float dt = (ahora - ultimoPID) / 1000.0f;
   if (dt <= 0.0f || dt > 10.0f) {
     dt = INTERVALO_TEMP / 1000.0f;
   }
 
   const float error = SETPOINT - tempActual;
-  const float integralPropuesta = integral + error * dt;
-
-  // Anti-windup en unidades de error-segundo.
-  integral = constrain(integralPropuesta, -50.0f, 50.0f);
+  integral = constrain(integral + error * dt, INTEGRAL_MIN, INTEGRAL_MAX);
   const float derivada = (error - errorAnterior) / dt;
-  const float salida = Kp * error + Ki * integral + Kd * derivada;
+  const float salida = KP * error + KI * integral + KD * derivada;
 
   pidOutput = constrain(salida, 0.0f, static_cast<float>(VENTANA_PWM));
   errorAnterior = error;
-  tiempoPIDAnterior = ahora;
+  ultimoPID = ahora;
 }
 
 void reiniciarPID() {
   integral = 0.0f;
   errorAnterior = 0.0f;
   pidOutput = 0.0f;
-  tiempoPIDAnterior = tiempoActual;
+  ultimoPID = ahora;
 }
 
 void apagarActuadores() {
@@ -286,72 +277,111 @@ void apagarActuadores() {
   digitalWrite(RELE_VENT, RELE_OFF);
 }
 
+void procesarSeguridad() {
+  apagarActuadores();
+  metaAlcanzada = false;
+  modoPIDActivo = false;
+  if (digitalRead(NIVEL_PIN) != LOW) {
+    temperaturaValida = false;
+  }
+  reiniciarPID();
+  detenerAudio();
+
+  if (ahora - ultimoUbidots >= INTERVALO_UBIDOTS) {
+    ultimoUbidots = ahora;
+    enviarDatosUbidots();
+  }
+  if (ahora - ultimaOLED >= INTERVALO_OLED) {
+    ultimaOLED = ahora;
+    mostrarOLED();
+  }
+}
+
+void detenerAudio() {
+  if (reproduciendoAudio && mp3Disponible) {
+    mp3.stop();
+  }
+  reproduciendoAudio = false;
+}
+
 void gestionarAudio() {
   if (metaAlcanzada && !reproduciendoAudio &&
-      tiempoActual - tiempoUltimoLlamado >= REPETICION_LLAMADO) {
-    tiempoUltimoLlamado = tiempoActual;
-    tiempoInicioAudio = tiempoActual;
+      ahora - ultimoLlamado >= REPETICION_LLAMADO) {
+    ultimoLlamado = ahora;
+    inicioAudio = ahora;
     reproduciendoAudio = true;
     if (mp3Disponible) {
       mp3.play(1);
     }
   }
 
-  if (reproduciendoAudio &&
-      tiempoActual - tiempoInicioAudio >= DURACION_AUDIO) {
-    if (mp3Disponible) {
-      mp3.stop();
-    }
-    reproduciendoAudio = false;
+  if (reproduciendoAudio && ahora - inicioAudio >= DURACION_AUDIO) {
+    detenerAudio();
   }
 }
 
 void enviarDatosUbidots() {
-  const int estadoCalor = digitalRead(RELE_CALOR) == RELE_ON ? 1 : 0;
-  const int estadoVent = digitalRead(RELE_VENT) == RELE_ON ? 1 : 0;
-  const int estadoNivel = digitalRead(NIVEL_PIN) == LOW ? 1 : 0;
-  int estadoGeneral = 0;
-
-  if (estadoNivel) {
-    if (!temperaturaValida) {
-      estadoGeneral = 5; // ERROR SENSOR
-    } else if (reproduciendoAudio) {
-      estadoGeneral = 4;
-    } else if (metaAlcanzada) {
-      estadoGeneral = 3;
-    } else if (modoPIDActivo) {
-      estadoGeneral = 2;
-    } else {
-      estadoGeneral = 1;
-    }
+  if (WiFi.status() != WL_CONNECTED || !ubidots.connected()) {
+    return;
   }
 
+  const int nivel = digitalRead(NIVEL_PIN) == LOW ? 1 : 0;
+  const int estadoCalor = digitalRead(RELE_CALOR) == RELE_ON ? 1 : 0;
+  const int estadoVent = digitalRead(RELE_VENT) == RELE_ON ? 1 : 0;
+  int estado = 0;
+
+  if (nivel) {
+    if (!temperaturaValida) estado = 5;       // Sensor invalido
+    else if (reproduciendoAudio) estado = 4; // Llamando
+    else if (metaAlcanzada) estado = 3;      // Temperatura OK
+    else if (modoPIDActivo) estado = 2;      // Control PID
+    else estado = 1;                         // Calentando
+  }
+
+  // Un solo publish reduce trafico y mantiene las variables sincronizadas.
   ubidots.add("temperatura", tempActual);
   ubidots.add("setpoint", SETPOINT);
   ubidots.add("rele-calor", estadoCalor);
   ubidots.add("rele-ventilador", estadoVent);
-  ubidots.add("nivel-agua", estadoNivel);
+  ubidots.add("nivel-agua", nivel);
   ubidots.add("temperatura-valida", temperaturaValida ? 1 : 0);
   ubidots.add("audio", reproduciendoAudio ? 1 : 0);
-  ubidots.add("estado", estadoGeneral);
+  ubidots.add("estado", estado);
   ubidots.publish(DEVICE_LABEL);
 }
 
-void mostrarOLED(const char *estadoStr) {
-  char buf[40];
+void mostrarOLED() {
   u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x10_tf);
+  u8g2.setFont(u8g2_font_5x7_tf);
 
-  snprintf(buf, sizeof(buf), "Temp: %.1f / %.1f C", tempActual, SETPOINT);
-  u8g2.drawStr(0, 12, buf);
-  snprintf(buf, sizeof(buf), "Estado: %s", estadoStr);
-  u8g2.drawStr(0, 28, buf);
-  snprintf(buf, sizeof(buf), "Calor: %s | Vent: %s",
-           digitalRead(RELE_CALOR) == RELE_ON ? "ON" : "OFF",
-           digitalRead(RELE_VENT) == RELE_ON ? "ON" : "OFF");
-  u8g2.drawStr(0, 44, buf);
-  snprintf(buf, sizeof(buf), "Nivel: %s",
-           digitalRead(NIVEL_PIN) == LOW ? "OK" : "BAJO!");
-  u8g2.drawStr(0, 60, buf);
+  const bool nivelOK = digitalRead(NIVEL_PIN) == LOW;
+  const bool wifiOK = WiFi.status() == WL_CONNECTED;
+  const bool ventON = digitalRead(RELE_VENT) == RELE_ON;
+  const bool calorON = digitalRead(RELE_CALOR) == RELE_ON;
+  char buf[35];
+
+  if (!nivelOK) u8g2.drawStr(0, 8, "ESTADO: NIVEL BAJO");
+  else if (!temperaturaValida) u8g2.drawStr(0, 8, "ESTADO: SENSOR ERROR");
+  else if (reproduciendoAudio) u8g2.drawStr(0, 8, "ESTADO: LLAMANDO");
+  else if (metaAlcanzada) u8g2.drawStr(0, 8, "ESTADO: TEMP OK");
+  else if (modoPIDActivo) u8g2.drawStr(0, 8, "ESTADO: CONTROL PID");
+  else u8g2.drawStr(0, 8, "ESTADO: CALENTANDO");
+
+  u8g2.drawHLine(0, 11, 128);
+  u8g2.drawStr(0, 20, "--- TEMPERATURA ---");
+  if (temperaturaValida) {
+    snprintf(buf, sizeof(buf), "SET: %.1fC REAL: %.1fC", SETPOINT, tempActual);
+  } else {
+    snprintf(buf, sizeof(buf), "SET: %.1fC REAL: --.-C", SETPOINT);
+  }
+  u8g2.drawStr(0, 30, buf);
+  u8g2.drawHLine(0, 33, 128);
+
+  snprintf(buf, sizeof(buf), "NIVEL: %s", nivelOK ? "OK" : "BAJO");
+  u8g2.drawStr(0, 42, buf);
+  snprintf(buf, sizeof(buf), "CALOR:%s VENT:%s", calorON ? "ON" : "OFF", ventON ? "ON" : "OFF");
+  u8g2.drawStr(0, 52, buf);
+  snprintf(buf, sizeof(buf), "WIFI: %s", wifiOK ? "OK" : "OFF");
+  u8g2.drawStr(0, 62, buf);
   u8g2.sendBuffer();
 }
