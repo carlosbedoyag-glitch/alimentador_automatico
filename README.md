@@ -8,7 +8,7 @@ Este proyecto automatiza la temperatura de un sistema de crianza porcina mediant
 
 - mantiene una temperatura objetivo configurable,
 - activa control PID para estabilizar la temperatura,
-- controla un ventilador con ciclo periódico,
+- ajusta la potencia del calentador mediante cálculo PID y comparación con la ventana PWM,
 - monitorea el nivel del agua,
 - reproduce una alerta sonora con DFPlayer Mini cuando se alcanza la temperatura objetivo,
 - envía variables a Ubidots para supervisión remota,
@@ -46,13 +46,13 @@ Este proyecto automatiza la temperatura de un sistema de crianza porcina mediant
 ## Variables clave
 
 ```cpp
-const float SETPOINT = 38.5.0f;
+const float SETPOINT = 38.5f;
 const float BANDA_PID = 3.0f;
 const float HIST_TEMPERATURA = 0.5f;
 
-const float Kp = 40.0f;
-const float Ki = 0.2f;
-const float Kd = 8.0f;
+const float KP = 40.0f;
+const float KI = 0.2f;
+const float KD = 8.0f;
 ```
 
 ## Lógica del sistema
@@ -78,12 +78,7 @@ Si la temperatura es inválida o el sensor no responde:
 
 ### 3. Control del ventilador
 
-El ventilador funciona en un ciclo:
-
-- se activa durante `TIEMPO_VENT_ON = 60000 ms`,
-- se desactiva durante el resto del ciclo `TIEMPO_VENT_CICLO = 300000 ms`.
-
-Esto evita un uso continuo excesivo y mejora la circulación del aire.
+El ventilador se mantiene activo mientras el sistema está calentando y se apaga cuando la temperatura alcanza el objetivo. Esto evita un uso continuo innecesario y mejora la circulación del aire.
 
 ### 4. Control de temperatura
 
@@ -103,9 +98,9 @@ Cuando la temperatura baja por debajo de la histéresis:
 
 El calentador usa un controlador PID para ajustar la potencia de calentamiento:
 
-- `Kp`: corrección proporcional,
-- `Ki`: corrección integral,
-- `Kd`: corrección derivativa.
+- `KP`: corrección proporcional,
+- `KI`: corrección integral,
+- `KD`: corrección derivativa.
 
 Se aplica anti-windup para limitar la integral y evitar excesos de calentamiento.
 
@@ -156,16 +151,6 @@ INICIO
       mostrar "ERROR SENSOR"
       enviar datos a Ubidots
       continuar
-    FIN SI
-
-    SI pasó el tiempo del ciclo del ventilador:
-      reiniciar ciclo
-    FIN SI
-
-    SI está dentro del tiempo de encendido del ventilador:
-      encender ventilador
-    SINO:
-      apagar ventilador
     FIN SI
 
     SI temperatura >= SETPOINT:
