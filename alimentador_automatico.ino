@@ -239,7 +239,9 @@ void loop() {
     if (ahora - inicioPWM >= VENTANA_PWM) {
       inicioPWM = ahora;
     }
-    const bool calefactorON = pidOutput > (ahora - inicioPWM);
+
+    const unsigned long tiempoPWM = ahora - inicioPWM;
+    const bool calefactorON = pidOutput > static_cast<float>(tiempoPWM);
     digitalWrite(RELE_CALOR, calefactorON ? RELE_ON : RELE_OFF);
   }
 
