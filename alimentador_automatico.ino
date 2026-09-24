@@ -3,6 +3,13 @@
 // ESP32 + Ubidots MQTT + OLED SH1106 + DS18B20 + DFPlayer Mini
 // ============================================================================
 
+// ============================================================================
+// BLOQUE 1: LIBRERIAS Y DEPENDENCIAS
+// -----------------------------------------------------------------------------
+// Incluye todas las bibliotecas necesarias para WiFi, MQTT, sensores,
+// display OLED, DS18B20 y reproductor MP3.
+// ============================================================================
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <UbidotsEsp32Mqtt.h>
@@ -13,8 +20,13 @@
 #include <DFRobotDFPlayerMini.h>
 
 // ============================================================================
-// CONFIGURACION
+// BLOQUE 2: CONFIGURACION GENERAL DEL SISTEMA
+// -----------------------------------------------------------------------------
+// Aquí se definen los parámetros de red, nombre del dispositivo y el modo de
+// operación del sensor. Los valores reales de WiFi y token deben mantenerse
+// fuera del repositorio por seguridad.
 // ============================================================================
+
 // Dejar en false cuando se conecte el DS18B20 real.
 #define SIMULAR_SENSOR false
 
@@ -31,6 +43,13 @@ Ubidots ubidots(UBIDOTS_TOKEN);
 constexpr uint8_t RELE_ON = LOW;
 constexpr uint8_t RELE_OFF = HIGH;
 
+// ============================================================================
+// BLOQUE 3: DEFINICION DE PINES Y COMPONENTES
+// -----------------------------------------------------------------------------
+// Se asignan los pines GPIO usados por los relés, sensor, display OLED y
+// DFPlayer. Esto centraliza la configuración del hardware.
+// ============================================================================
+
 // Pines.
 constexpr uint8_t ONE_WIRE_BUS = 4;
 constexpr uint8_t RELE_VENT = 26;
@@ -46,7 +65,10 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
 // ============================================================================
-// CONTROL TERMICO
+// BLOQUE 4: PARAMETROS DEL CONTROL TERMICO
+// -----------------------------------------------------------------------------
+// Aquí se configuran los valores del setpoint, rango de histéresis y
+// constantes del controlador PID.
 // ============================================================================
 constexpr float SETPOINT = 38.5f;
 constexpr float BANDA_PID = 3.0f;
@@ -57,13 +79,22 @@ constexpr float KD = 8.0f;
 constexpr float INTEGRAL_MIN = -50.0f;
 constexpr float INTEGRAL_MAX = 50.0f;
 
+// ============================================================================
+// BLOQUE 5: VARIABLES DE ESTADO Y CONTROL
+// -----------------------------------------------------------------------------
+// Se almacenan aquí los valores actuales del sistema: temperatura, errores,
+// salida PID, tiempos y banderas de estado.
+// ============================================================================
 float tempActual = 0.0f;
 float errorAnterior = 0.0f;
 float integral = 0.0f;
 float pidOutput = 0.0f;
 
 // ============================================================================
-// INTERVALOS
+// BLOQUE 6: INTERVALOS DE TIMING Y DELAY
+// -----------------------------------------------------------------------------
+// Define cada cuánto tiempo se toman lecturas, se actualiza la pantalla,
+// se transmite a Ubidots y se activa la alarma sonora.
 // ============================================================================
 constexpr unsigned long VENTANA_PWM = 5000UL;
 constexpr unsigned long INTERVALO_TEMP = 800UL;
@@ -89,6 +120,12 @@ bool modoPIDActivo = false;
 bool temperaturaValida = false;
 bool mp3Disponible = false;
 
+// ============================================================================
+// BLOQUE 7: PROTOTIPOS DE FUNCIONES
+// -----------------------------------------------------------------------------
+// Declara las funciones que se usan en setup() y loop() para mantener
+// una organización clara del código.
+// ============================================================================
 void mostrarOLED();
 void gestionarAudio();
 void calcularPID();
@@ -100,16 +137,24 @@ void enviarDatosUbidots();
 void actualizarComunicaciones();
 void detenerAudio();
 
+// ============================================================================
+// BLOQUE 8: SETUP
+// -----------------------------------------------------------------------------
+// Inicializa todos los periféricos: serial, comunicación I2C, relés,
+// sensor, OLED, DFPlayer y conexión WiFi.
+// ============================================================================
 void setup() {
   Serial.begin(115200);
   delay(100);
   Wire.begin(21, 22);
 
+  // Configuración de los relés como salidas y apagado inicial.
   pinMode(RELE_VENT, OUTPUT);
   pinMode(RELE_CALOR, OUTPUT);
   pinMode(NIVEL_PIN, INPUT_PULLUP);
   apagarActuadores();
 
+  // Inicializa la pantalla OLED con un mensaje de arranque.
   u8g2.begin();
   u8g2.setFont(u8g2_font_5x7_tf);
   u8g2.clearBuffer();
@@ -117,12 +162,14 @@ void setup() {
   u8g2.drawStr(0, 35, "Iniciando...");
   u8g2.sendBuffer();
 
+  // Inicializa el sensor DS18B20 si no se está simulando.
 #if !SIMULAR_SENSOR
   sensors.begin();
   sensors.setWaitForConversion(false);
   sensors.requestTemperatures();
 #endif
 
+  // Inicializa el DFPlayer Mini.
   mp3Serial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
   mp3Disponible = mp3.begin(mp3Serial, true, false);
   if (mp3Disponible) {
@@ -132,26 +179,38 @@ void setup() {
     Serial.println("DFPlayer no disponible; se continua sin audio.");
   }
 
+  // Configura WiFi y la conexión de Ubidots.
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   ubidots.setup();
 
+  // Inicializa tiempos de control.
   ahora = millis();
   ultimaTemperatura = ahora;
   ultimoPID = ahora;
   inicioPWM = ahora;
 }
 
+// ============================================================================
+// BLOQUE 9: LOOP PRINCIPAL
+// -----------------------------------------------------------------------------
+// Es el ciclo continuo del programa. Aquí se actualizan comunicaciones,
+// se revisa el nivel del agua, se lee la temperatura, se activa la lógica
+// térmica y se publica información.
+// ============================================================================
 void loop() {
   ahora = millis();
+
+  // Mantiene activas la conexión WiFi y MQTT.
   actualizarComunicaciones();
 
-  // Las protecciones siempre se ejecutan localmente, aunque no haya WiFi.
+  // Si el nivel de agua está bajo, se bloquea el funcionamiento normal.
   if (digitalRead(NIVEL_PIN) != LOW) {
     procesarSeguridad();
     return;
   }
 
+  // Lee y valida la temperatura.
   actualizarTemperatura();
   if (!temperaturaValida) {
     procesarSeguridad();
@@ -167,13 +226,16 @@ void loop() {
 
   // El ventilador/agitador funciona durante el calentamiento.
   digitalWrite(RELE_VENT, metaAlcanzada ? RELE_OFF : RELE_ON);
+
+  // Lógica de audio de alerta cuando se alcanza la temperatura objetivo.
   gestionarAudio();
 
+  // Control de calentador según estado de temperatura y modo PID.
   if (metaAlcanzada) {
     digitalWrite(RELE_CALOR, RELE_OFF);
     reiniciarPID();
   } else if (!modoPIDActivo) {
-    // Calentamiento completo mientras se esta lejos del setpoint.
+    // Calentamiento completo mientras se está lejos del setpoint.
     digitalWrite(RELE_CALOR, RELE_ON);
   } else {
     if (ahora - inicioPWM >= VENTANA_PWM) {
@@ -183,16 +245,25 @@ void loop() {
     digitalWrite(RELE_CALOR, calefactorON ? RELE_ON : RELE_OFF);
   }
 
+  // Publicación periódica de datos a Ubidots.
   if (ahora - ultimoUbidots >= INTERVALO_UBIDOTS) {
     ultimoUbidots = ahora;
     enviarDatosUbidots();
   }
+
+  // Actualización periódica del display OLED.
   if (ahora - ultimaOLED >= INTERVALO_OLED) {
     ultimaOLED = ahora;
     mostrarOLED();
   }
 }
 
+// ============================================================================
+// BLOQUE 10: ACTUALIZACION DE COMUNICACIONES
+// -----------------------------------------------------------------------------
+// Reintenta la conexión WiFi cuando se pierde, y mantiene la sesión MQTT
+// de Ubidots viva cuando la red está disponible.
+// ============================================================================
 void actualizarComunicaciones() {
   if (WiFi.status() != WL_CONNECTED) {
     if (ahora - ultimoIntentoWiFi >= TIMEOUT_RECONEXION) {
@@ -210,6 +281,12 @@ void actualizarComunicaciones() {
   ubidots.loop();
 }
 
+// ============================================================================
+// BLOQUE 11: ACTUALIZACION DE TEMPERATURA
+// -----------------------------------------------------------------------------
+// Lee el sensor DS18B20, valida la lectura y decide si el sistema debe
+// entrar en modo de control PID o calentamiento manual.
+// ============================================================================
 void actualizarTemperatura() {
   if (ahora - ultimaTemperatura < INTERVALO_TEMP) {
     return;
@@ -217,7 +294,7 @@ void actualizarTemperatura() {
 
 #if SIMULAR_SENSOR
   temperaturaValida = true;
-  // Simulacion simple para pruebas de pantalla y actuadores.
+  // Simulación simple para pruebas de pantalla y actuadores.
   tempActual += metaAlcanzada ? -0.1f : 0.4f;
   if (tempActual > 42.0f) {
     tempActual = 20.0f;
@@ -249,6 +326,12 @@ void actualizarTemperatura() {
   ultimaTemperatura = ahora;
 }
 
+// ============================================================================
+// BLOQUE 12: CONTROLADOR PID
+// -----------------------------------------------------------------------------
+// Calcula la salida del controlador en base al error y la derivada,
+// usando un filtro de integral y limitando el rango de salida.
+// ============================================================================
 void calcularPID() {
   float dt = (ahora - ultimoPID) / 1000.0f;
   if (dt <= 0.0f || dt > 10.0f) {
@@ -272,11 +355,23 @@ void reiniciarPID() {
   ultimoPID = ahora;
 }
 
+// ============================================================================
+// BLOQUE 13: CONTROL DE ACTUADORES
+// -----------------------------------------------------------------------------
+// Apaga ambos relés en estado inicial o de emergencia, evitando arranques
+// accidentales al reiniciar el sistema.
+// ============================================================================
 void apagarActuadores() {
   digitalWrite(RELE_CALOR, RELE_OFF);
   digitalWrite(RELE_VENT, RELE_OFF);
 }
 
+// ============================================================================
+// BLOQUE 14: SEGURIDAD DEL SISTEMA
+// -----------------------------------------------------------------------------
+// Si el nivel de agua es insuficiente o el sensor falla, se apagan los
+// actuadores y se detiene el audio para evitar daños.
+// ============================================================================
 void procesarSeguridad() {
   apagarActuadores();
   metaAlcanzada = false;
@@ -297,6 +392,12 @@ void procesarSeguridad() {
   }
 }
 
+// ============================================================================
+// BLOQUE 15: CONTROL DE AUDIO
+// -----------------------------------------------------------------------------
+// Reproduce una alerta sonora cuando la temperatura alcanza el objetivo y
+// detiene la reproducción después de cierto tiempo.
+// ============================================================================
 void detenerAudio() {
   if (reproduciendoAudio && mp3Disponible) {
     mp3.stop();
@@ -320,6 +421,12 @@ void gestionarAudio() {
   }
 }
 
+// ============================================================================
+// BLOQUE 16: PUBLICACION A UBIDOTS
+// -----------------------------------------------------------------------------
+// Envía el estado actual del sistema a Ubidots en un único lote para
+// reducir tráfico y mantener variables sincronizadas.
+// ============================================================================
 void enviarDatosUbidots() {
   if (WiFi.status() != WL_CONNECTED || !ubidots.connected()) {
     return;
@@ -350,6 +457,12 @@ void enviarDatosUbidots() {
   ubidots.publish(DEVICE_LABEL);
 }
 
+// ============================================================================
+// BLOQUE 17: VISUALIZACION EN OLED
+// -----------------------------------------------------------------------------
+// Muestra de forma legible el estado del sistema, temperatura, nivel de agua,
+// relés y WiFi en la pantalla pequeña.
+// ============================================================================
 void mostrarOLED() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tf);
