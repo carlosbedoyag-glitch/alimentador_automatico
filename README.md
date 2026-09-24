@@ -9,6 +9,7 @@ Este proyecto automatiza la temperatura de un sistema de crianza porcina mediant
 - mantiene una temperatura objetivo configurable,
 - activa control PID para estabilizar la temperatura,
 - ajusta la potencia del calentador mediante cálculo PID y comparación con la ventana PWM,
+- activa el ventilador para mejorar la circulación del aire y estabilizar la temperatura,
 - monitorea el nivel del agua,
 - reproduce una alerta sonora con DFPlayer Mini cuando se alcanza la temperatura objetivo,
 - envía variables a Ubidots para supervisión remota,
@@ -78,7 +79,7 @@ Si la temperatura es inválida o el sensor no responde:
 
 ### 3. Control del ventilador
 
-El ventilador se mantiene activo mientras el sistema está calentando y se apaga cuando la temperatura alcanza el objetivo. Esto evita un uso continuo innecesario y mejora la circulación del aire.
+El ventilador es un actuador auxiliar del sistema térmico. Cuando la temperatura está por debajo del objetivo, el ventilador se activa para ayudar a la circulación del aire y mantener un flujo uniforme en el sistema. Cuando se alcanza la temperatura objetivo, el ventilador se apaga para evitar un uso continuo innecesario. En el código, esta acción se controla con la bandera `metaAlcanzada` y la salida del sistema térmico.
 
 ### 4. Control de temperatura
 
