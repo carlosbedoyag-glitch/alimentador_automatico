@@ -1,8 +1,8 @@
 # Alimentador Automático
 
-Firmware para ESP32 que controla un sistema térmico con calentador y ventilador/agitador, mide la temperatura mediante un DS18B20 y muestra/publica el estado local y remotamente. También incluye lectura de nivel, una pantalla OLED SH1106, un DFPlayer Mini y conexión WiFi/MQTT con Ubidots.
+Firmware para ESP32 que controla un sistema térmico con calentador y ventilador/agitador, mide la temperatura mediante un DS18B20 y muestra/publica el estado local y remotamente. También incluye alarma sonora con DFPlayer Mini y telemetría en Ubidots.
 
-> La documentación describe el firmware que está en `alimentador_automatico.ino`, incluidos sus valores actuales. El control de cargas térmicas debe probarse y validarse con supervisión técnica antes de usarlo en una instalación real.
+> La documentación describe el firmware que está en `alimentador_automatico.ino`, incluidos sus valores actuales. El control de cargas térmicas debe probarse y validarse con supervisión técnica.
 
 ## Archivos
 
@@ -52,12 +52,12 @@ Instala el soporte para placas ESP32 y estas bibliotecas mediante el gestor de b
 1. Abre `alimentador_automatico.ino` en Arduino IDE y selecciona la placa ESP32 y el puerto correctos.
 2. Reemplaza los valores de ejemplo por el token de Ubidots y las credenciales de tu red:
 
-   ```cpp
-   const char *UBIDOTS_TOKEN = "TU_TOKEN_UBIDOTS";
-   const char *WIFI_SSID = "TU_RED_WIFI";
-   const char *WIFI_PASS = "TU_CONTRASENA_WIFI";
-   const char *DEVICE_LABEL = "control-termico-esp32";
-   ```
+    ```cpp
+    const char *UBIDOTS_TOKEN = "TU_TOKEN_UBIDOTS";
+    const char *WIFI_SSID = "TU_RED_WIFI";
+    const char *WIFI_PASS = "TU_CONTRASENA_WIFI";
+    const char *DEVICE_LABEL = "control-termico-esp32";
+    ```
 
 3. Compila y carga el programa.
 4. Comprueba en Ubidots el dispositivo `control-termico-esp32` y las variables publicadas.
@@ -70,7 +70,7 @@ No subas tokens ni contraseñas reales al repositorio. Usa credenciales locales 
 | Constante | Valor | Uso en el firmware |
 |---|---:|---|
 | `SETPOINT` | 38.0 °C | Temperatura objetivo. La bandera de meta se activa al alcanzar este valor. |
-| `BANDA_PID` | 0.3 °C | El modo PID se marca activo entre 37.7 °C y 38.3 °C, si la meta todavía no está alcanzada. Como la meta se activa al llegar a 38.0 °C, el calentador efectivamente usa PID antes de ese umbral. |
+| `BANDA_PID` | 0.3 °C | El modo PID se marca activo entre 37.7 °C y 38.3 °C, si la meta todavía no está alcanzada. Como la meta se activa al llegar a 38.0 °C, el calentador efectivamente usa el PID en una zona muy cercana al objetivo. |
 | `HIST_TEMPERATURA` | 2.0 °C | La meta alcanzada se desactiva cuando la temperatura baja hasta 36.0 °C. |
 | `KP`, `KI`, `KD` | 40.0, 0.2, 8.0 | Ganancias proporcional, integral y derivativa del cálculo PID. |
 | `VENTANA_PWM` | 5 s | Ventana temporal para comparar la salida PID y conmutar el relé del calentador. |
@@ -87,11 +87,11 @@ No subas tokens ni contraseñas reales al repositorio. Usa credenciales locales 
 
 ### Arranque
 
-`setup()` inicializa el puerto serial, I2C, pines, pantalla, sensor DS18B20, DFPlayer, WiFi y Ubidots. Los relés se apagan al inicio. El DS18B20 trabaja sin esperar la conversión de forma bloqueante; el firmware solicita una conversión y obtiene la lectura en una actualización posterior.
+`setup()` inicializa el puerto serial, I2C, pines, pantalla, sensor DS18B20, DFPlayer, WiFi y Ubidots. Los relés se apagan al inicio. El DS18B20 trabaja sin esperar la conversión de forma bloqueante y solicita una lectura de primer ciclo.
 
 ### Lectura y validación de temperatura
 
-Cada vez que vence `INTERVALO_TEMP`, se consulta el DS18B20. Se acepta una lectura cuando no es `DEVICE_DISCONNECTED_C` y está entre -10 °C y 85 °C. Si la lectura es válida, se actualiza `tempActual`; si no, se reinicia el PID y se registra el error por Serial. En ambos casos se solicita la siguiente conversión.
+Cada vez que vence `INTERVALO_TEMP`, se consulta el DS18B20. Se acepta una lectura cuando no es `DEVICE_DISCONNECTED_C` y está entre -10 °C y 85 °C. Si la lectura es válida, se actualiza `tempActual`; si no, se marca `temperaturaValida = false` y se fuerza el estado de seguridad.
 
 ### Control del calentador
 
@@ -100,7 +100,7 @@ Cada vez que vence `INTERVALO_TEMP`, se consulta el DS18B20. Se acepta una lectu
 - Al alcanzar 38.0 °C, se marca `metaAlcanzada`, se apaga el calentador y se reinicia el PID.
 - La meta permanece activa hasta que la lectura baja a 36.0 °C; entonces el sistema vuelve al modo de calentamiento.
 
-La ventana `BANDA_PID` se comprueba como rango de temperatura, pero la bandera `metaAlcanzada` toma prioridad a partir de 38.0 °C. Por ello, no se debe interpretar el tramo de 38.0 °C a 38.3 °C como un tramo efectivo de regulación PID del calentador.
+La ventana `BANDA_PID` se comprueba como rango de temperatura, pero la bandera `metaAlcanzada` toma prioridad a partir de 38.0 °C. Por ello, no se debe interpretar el tramo de 38.0 °C a 38.3 °C como un calentamiento normal en todas las circunstancias; la condición de meta y la histéresis son decisivas.
 
 ### Ventilador / agitador
 
@@ -110,13 +110,13 @@ La ventana `BANDA_PID` se comprueba como rango de temperatura, pero la bandera `
 
 ### Seguridad
 
-Si el pin de nivel no está en LOW o la temperatura no es válida, el bucle llama a `procesarSeguridad()`. Esta función apaga ambos relés, borra el estado de meta y el modo PID, reinicia el PID y detiene el audio. La pantalla y la telemetría siguen actualizándose según sus intervalos.
+Si el pin de nivel no está en LOW o la temperatura no es válida, el bucle llama a `procesarSeguridad()`. Esta función apaga ambos relés, borra el estado de meta y el modo PID, reinicia el PID, detiene audio y continúa publicando telemetría y mostrando OLED para dejar el fallo visible.
 
-El código asume la lógica eléctrica descrita arriba: relés activos en LOW y nivel correcto en LOW. Confirma estas condiciones con el hardware real; una polaridad distinta puede cambiar el comportamiento de seguridad.
+El código asume la lógica eléctrica descrita arriba: relés activos en LOW y nivel correcto en LOW. Confirma estas condiciones con el hardware real; una polaridad distinta puede cambiar el comportamiento del sistema y el sentido de cada alarma.
 
 ### Alerta sonora
 
-Cuando se alcanza la meta, `gestionarAudio()` inicia la pista 1 del DFPlayer si han transcurrido al menos 60 segundos desde el aviso anterior. El estado de reproducción se limpia a los 30 segundos y se llama a `stop()`. Si el DFPlayer no se detecta, el firmware continúa sin enviar comandos al módulo; la bandera de audio igualmente representa el intervalo de aviso.
+Cuando se alcanza la meta, `gestionarAudio()` inicia la pista 1 del DFPlayer si han transcurrido al menos 60 segundos desde el aviso anterior. El estado de reproducción se limpia a los 30 segundos para evitar que el audio quede activo indefinidamente.
 
 ### WiFi, Ubidots y pantalla
 
