@@ -1,75 +1,74 @@
 # Pseudocódigo del alimentador automático
 
-Este pseudocódigo corresponde al firmware de `alimentador_automatico.ino`.
-
 ```text
 INICIO
 
-  Inicializar ESP32, Serial e I2C
-  Configurar relés y sensor de nivel
+  Inicializar ESP32
+  Configurar comunicación Serial e I2C
+  Configurar pines de relés y sensor de nivel
   Apagar calentador y ventilador
-  Inicializar OLED y DS18B20
-  Inicializar DFPlayer
-  Iniciar WiFi y configurar Ubidots
+  Inicializar pantalla OLED
+  Inicializar sensor DS18B20
+  Inicializar DFPlayer Mini
+  Iniciar conexión WiFi y configurar Ubidots
 
-  SETPOINT = 38.0 °C
-  BANDA_PID = 0.3 °C
-  HIST_TEMPERATURA = 2.0 °C
-  VENTANA_PWM = 5 s
+  Definir temperatura objetivo: 38 °C
+  Definir banda PID: 0.3 °C
+  Definir histéresis: 2 °C
 
-  REPETIR SIEMPRE:
+  REPETIR continuamente:
 
-    Actualizar tiempo actual
-    Gestionar conexión WiFi y MQTT
-    Actualizar temperatura cuando corresponda
+    Actualizar hora del sistema
+    Revisar conexión WiFi y Ubidots
+    Leer temperatura cuando corresponda
 
-    SI el nivel no es correcto O la temperatura no es válida:
-      Apagar calentador y ventilador
-      Borrar estado de meta y modo PID
-      Reiniciar PID
+    SI el nivel de agua es bajo O la temperatura no es válida:
+      Apagar calentador
+      Apagar ventilador
       Detener audio
-      Actualizar pantalla y telemetría cuando corresponda
-      CONTINUAR
+      Reiniciar PID
+      Mostrar alerta en pantalla
+      Enviar estado a Ubidots cuando corresponda
+      Volver al inicio del ciclo
     FIN SI
 
-    SI metaAlcanzada es FALSO Y temperatura >= SETPOINT:
-      metaAlcanzada = VERDADERO
+    SI la temperatura alcanza 38 °C:
+      Marcar temperatura objetivo alcanzada
       Reiniciar temporizador del ventilador
-    SINO SI metaAlcanzada es VERDADERO Y
-            temperatura <= SETPOINT - HIST_TEMPERATURA:
-      metaAlcanzada = FALSO
     FIN SI
 
-    SI metaAlcanzada es FALSO:
+    SI la temperatura baja hasta 36 °C:
+      Marcar temperatura objetivo no alcanzada
+    FIN SI
+
+    SI la temperatura objetivo no se ha alcanzado:
       Mantener ventilador encendido
     SINO:
-      Ejecutar ciclo del ventilador: 20 s encendido dentro de un ciclo de 60 s
+      Controlar el ventilador según su ciclo programado
     FIN SI
 
-    SI se alcanzó la meta Y han pasado al menos 60 s desde el último llamado:
-      Reproducir pista 1 del DFPlayer
-      Marcar audio activo e iniciar temporizador
+    SI la temperatura objetivo se alcanzó Y corresponde emitir el aviso:
+      Reproducir audio
     FIN SI
-    SI audio activo durante 30 s:
+
+    SI el audio lleva 30 segundos reproduciéndose:
       Detener audio
     FIN SI
 
-    SI metaAlcanzada:
+    SI la temperatura objetivo se alcanzó:
       Apagar calentador
       Reiniciar PID
-    SINO SI modoPIDActivo:
-      Comparar salida PID con el tiempo transcurrido de la ventana PWM
-      Encender o apagar calentador según el resultado
+    SINO SI el control PID está activo:
+      Calcular salida PID
+      Encender o apagar calentador según la salida PID
     SINO:
-      Mantener calentador encendido
+      Encender calentador
     FIN SI
 
-    Actualizar OLED cada 250 ms cuando corresponda
-    Publicar telemetría en Ubidots cada 5 s cuando corresponda
+    Actualizar pantalla OLED cada 250 ms
+    Enviar datos a Ubidots cada 5 segundos
 
   FIN REPETIR
 
 FIN
 ```
-
-> El ventilador se apaga durante la parte restante de su ciclo de 60 segundos; no se usa un nombre de carpeta derivado de esa descripción.
