@@ -13,13 +13,6 @@
 // ============================================================================
 // BLOQUE 1: LIBRERIAS Y DEPENDENCIAS
 // -----------------------------------------------------------------------------
-// Se importan las librerías necesarias para:
-// - WiFi y MQTT (Ubidots)
-// - Pantalla OLED SH1106
-// - Comunicación I2C
-// - Sensor de temperatura DS18B20
-// - Reproductor DFPlayer Mini
-// ============================================================================
 #include <Arduino.h>
 #include <WiFi.h>
 #include <UbidotsEsp32Mqtt.h>
@@ -32,10 +25,7 @@
 // ============================================================================
 // BLOQUE 2: CONFIGURACION GENERAL DEL SISTEMA
 // -----------------------------------------------------------------------------
-// Aquí se define la identidad del dispositivo, la red WiFi y el token que
-// permite conectar a Ubidots. Los valores por defecto deben reemplazarse por
-// credenciales reales antes de cargar el firmware al ESP32.
-// ============================================================================
+TU_CONTRASENA_WIFI
 const char *UBIDOTS_TOKEN = "TU_TOKEN_UBIDOTS";
 const char *WIFI_SSID = "TU_RED_WIFI";
 const char *WIFI_PASS = "TU_CONTRASENA_WIFI";
@@ -44,18 +34,12 @@ const char *DEVICE_LABEL = "control-termico-esp32";
 Ubidots ubidots(UBIDOTS_TOKEN);
 
 // Relés activos en LOW.
-// Esto significa que el relé se activa cuando el GPIO escribe LOW y se apaga
-// cuando escribe HIGH. Es importante mantener este criterio consistente en
-// toda la lógica del control.
 constexpr uint8_t RELE_ON = LOW;
 constexpr uint8_t RELE_OFF = HIGH;
 
 // ============================================================================
 // BLOQUE 3: DEFINICION DE PINES Y COMPONENTES
 // -----------------------------------------------------------------------------
-// Se centraliza la conexión física para facilitar mantenimiento, pruebas e
-// cambios de hardware. Si se mueve un componente, solo se edita este bloque.
-// ============================================================================
 constexpr uint8_t ONE_WIRE_BUS = 4;
 constexpr uint8_t RELE_VENT = 26;
 constexpr uint8_t RELE_CALOR = 25;
@@ -72,15 +56,9 @@ DallasTemperature sensors(&oneWire);
 // ============================================================================
 // BLOQUE 4: PARAMETROS DEL CONTROL TERMICO
 // -----------------------------------------------------------------------------
-// Aquí se definen los valores básicos del controlador térmico:
-// - SETPOINT: temperatura objetivo del proceso.
-// - BANDA_PID: ventana alrededor del setpoint donde se activa el control PID.
-// - HIST_TEMPERATURA: separa el estado de meta del calentamiento real.
-// - KP, KI, KD: ganancias del controlador PID.
-// ============================================================================
 constexpr float SETPOINT = 38.0f;
-constexpr float BANDA_PID = 0.3f;        // PID activo alrededor de 37.7°C a 38.3°C.
-constexpr float HIST_TEMPERATURA = 2.0f; // Se sale de la meta al bajar a 36.0°C.
+constexpr float BANDA_PID = 0.5f;
+constexpr float HIST_TEMPERATURA = 2.0f;
 constexpr float KP = 40.0f;
 constexpr float KI = 0.2f;
 constexpr float KD = 8.0f;
@@ -90,13 +68,6 @@ constexpr float INTEGRAL_MAX = 50.0f;
 // ============================================================================
 // BLOQUE 5: VARIABLES DE ESTADO Y CONTROL
 // -----------------------------------------------------------------------------
-// En esta sección se almacenan las variables que el sistema usa de forma
-// dinámica durante la ejecución:
-// - temperatura leída
-// - error y acumulador integral para PID
-// - estado del sistema y de los actuadores
-// - banderas de seguridad, audio y conexión
-// ============================================================================
 float tempActual = 0.0f;
 float errorAnterior = 0.0f;
 float integral = 0.0f;
@@ -107,14 +78,12 @@ bool reproduciendoAudio = false;
 bool modoPIDActivo = false;
 bool temperaturaValida = false;
 bool mp3Disponible = false;
+bool audioCicloIniciado = false;
+bool audioBloqueadoSobreTemp = false;
 
 // ============================================================================
 // BLOQUE 6: INTERVALOS DE TIMING Y DELAY
 // -----------------------------------------------------------------------------
-// Se definen los tiempos de lectura, de actualización del display, de envío a
-// Ubidots, de activación del audio y del ventilador. Estos valores se usan en
-// el bucle principal para evitar bloqueos y mantener la lógica ordenada.
-// ============================================================================
 constexpr unsigned long VENTANA_PWM = 5000UL;
 constexpr unsigned long INTERVALO_TEMP = 800UL;
 constexpr unsigned long REPETICION_LLAMADO = 60000UL;
@@ -137,12 +106,14 @@ unsigned long ultimoIntentoWiFi = 0;
 unsigned long ultimoPID = 0;
 unsigned long inicioVentilador = 0;
 
+// NUEVO: variable para identificar el estado anterior de la meta.
+// Permite reiniciar el ciclo del ventilador cuando se alcanzan los 38 °C
+// o cuando la temperatura desciende hasta los 36 °C.
+bool estadoAnteriorMeta = false;
+
 // ============================================================================
 // BLOQUE 7: PROTOTIPOS DE FUNCIONES
 // -----------------------------------------------------------------------------
-// El firmware organiza la lógica en funciones pequeñas para que el código sea
-// más legible, fácil de depurar y más sencillo de mantener.
-// ============================================================================
 void mostrarOLED();
 void gestionarAudio();
 void gestionarVentilador();
@@ -158,14 +129,6 @@ void detenerAudio();
 // ============================================================================
 // BLOQUE 8: SETUP
 // -----------------------------------------------------------------------------
-// Este bloque se ejecuta una sola vez al iniciar el ESP32. Aquí se:
-// - inicializa la comunicación serial
-// - activa los pines de salida
-// - configura el OLED
-// - arranca el sensor DS18B20
-// - inicializa el DFPlayer
-// - conecta WiFi y prepara MQTT/Ubidots
-// ============================================================================
 void setup() {
   Serial.begin(115200);
   delay(100);
@@ -212,15 +175,6 @@ void setup() {
 // ============================================================================
 // BLOQUE 9: LOOP PRINCIPAL
 // -----------------------------------------------------------------------------
-// Este es el ciclo eterno del sistema. Aquí se ejecuta la máquina de estados
-// del control térmico:
-// 1. mantener la conexión a WiFi/MQTT
-// 2. leer y validar la temperatura
-// 3. revisar nivel y seguridad
-// 4. determinar si la meta está alcanzada
-// 5. controlar calentador y ventilador
-// 6. actualizar pantalla y Ubidots
-// ============================================================================
 void loop() {
   ahora = millis();
   actualizarComunicaciones();
@@ -241,6 +195,7 @@ void loop() {
     inicioVentilador = ahora;
   } else if (metaAlcanzada && tempActual <= (SETPOINT - HIST_TEMPERATURA)) {
     metaAlcanzada = false;
+    inicioVentilador = ahora;
   }
 
   gestionarVentilador();
@@ -277,9 +232,6 @@ void loop() {
 // ============================================================================
 // BLOQUE 10: ACTUALIZACION DE COMUNICACIONES
 // -----------------------------------------------------------------------------
-// Se delega la gestión de WiFi/MQTT a esta función para mantener el código
-// limpio y tener un único punto de control de reconexión.
-// ============================================================================
 void actualizarComunicaciones() {
   if (WiFi.status() != WL_CONNECTED) {
     if (ahora - ultimoIntentoWiFi >= TIMEOUT_RECONEXION) {
@@ -291,9 +243,15 @@ void actualizarComunicaciones() {
     return;
   }
 
+  static unsigned long ultimoIntentoMQTT = 0;
+
   if (!ubidots.connected()) {
-    Serial.println("Reconectando a Ubidots MQTT...");
-    ubidots.reconnect();
+    if (ahora - ultimoIntentoMQTT >= TIMEOUT_RECONEXION) {
+      ultimoIntentoMQTT = ahora;
+      Serial.println("Reconectando a Ubidots MQTT...");
+      ubidots.reconnect();
+    }
+    return;
   }
   ubidots.loop();
 }
@@ -301,13 +259,6 @@ void actualizarComunicaciones() {
 // ============================================================================
 // BLOQUE 11: ACTUALIZACION DE TEMPERATURA
 // -----------------------------------------------------------------------------
-// Esta función se encarga de:
-// - verificar si ya venció el intervalo de lectura
-// - pedir la temperatura al DS18B20
-// - validar el rango aceptado
-// - decidir si se activa PID o no
-// - reiniciar el controlador si la lectura falla
-// ============================================================================
 void actualizarTemperatura() {
   if (ahora - ultimaTemperatura < INTERVALO_TEMP) {
     return;
@@ -322,9 +273,11 @@ void actualizarTemperatura() {
   sensors.requestTemperatures();
 
   if (temperaturaValida) {
-    // El PID solo debe activarse cerca del setpoint y antes de alcanzar la meta.
+    // El PID interviene solamente durante el calentamiento, entre 37.5 y 38.0 °C.
+    // Por debajo de 37.5 °C se conserva el calentamiento a maxima potencia.
+    // Al llegar a 38.0 °C, la histeresis apaga el calentador hasta 36.0 °C.
     if (!metaAlcanzada && tempActual >= (SETPOINT - BANDA_PID) &&
-        tempActual <= (SETPOINT + BANDA_PID)) {
+        tempActual < SETPOINT) {
       modoPIDActivo = true;
       calcularPID();
     } else {
@@ -342,10 +295,6 @@ void actualizarTemperatura() {
 // ============================================================================
 // BLOQUE 12: CONTROLADOR PID
 // -----------------------------------------------------------------------------
-// El algoritmo calcula la salida del calentador en base a la diferencia entre
-// la temperatura deseada y la real. La salida se limita a una ventana temporal
-// para que el relé del calentador no se quede encendido de forma indefinida.
-// ============================================================================
 void calcularPID() {
   float dt = (ahora - ultimoPID) / 1000.0f;
   if (dt <= 0.0f || dt > 10.0f) {
@@ -372,10 +321,6 @@ void reiniciarPID() {
 // ============================================================================
 // BLOQUE 13: APAGADO DE ACTUADORES
 // -----------------------------------------------------------------------------
-// Se apagan ambos relés al inicio, en condición de error o justo antes de
-// reiniciar el sistema. Esto evita arrancar accidentalmente el calentador o
-// el ventilador con alimentación inconsistente.
-// ============================================================================
 void apagarActuadores() {
   digitalWrite(RELE_CALOR, RELE_OFF);
   digitalWrite(RELE_VENT, RELE_OFF);
@@ -384,13 +329,8 @@ void apagarActuadores() {
 // ============================================================================
 // BLOQUE 14: ESTADO DE SEGURIDAD
 // -----------------------------------------------------------------------------
-// Si falta agua o la lectura del sensor es inválida, el sistema entra en modo
-// seguro: no calienta, no agita, no reproduce audio y deja marcada la señal de
-// alarma para que el operador revise el equipo.
-// ============================================================================
 void procesarSeguridad() {
   apagarActuadores();
-  metaAlcanzada = false;
   modoPIDActivo = false;
   reiniciarPID();
   detenerAudio();
@@ -406,14 +346,9 @@ void procesarSeguridad() {
     mostrarOLED();
   }
 }
-
 // ============================================================================
 // BLOQUE 15: ALERTA SONORA
 // -----------------------------------------------------------------------------
-// Cuando la temperatura objetivo es alcanzada, se genera una repetición de
-// alarma con el DFPlayer. La reproducción tiene temporización para evitar que
-// el audio se quede activo indefinidamente.
-// ============================================================================
 void detenerAudio() {
   if (reproduciendoAudio && mp3Disponible) {
     mp3.stop();
@@ -422,17 +357,45 @@ void detenerAudio() {
 }
 
 void gestionarAudio() {
-  if (metaAlcanzada && !reproduciendoAudio &&
-      ahora - ultimoLlamado >= REPETICION_LLAMADO) {
-    ultimoLlamado = ahora;
-    inicioAudio = ahora;
-    reproduciendoAudio = true;
-    if (mp3Disponible) {
-      mp3.play(1);
-    }
+  // Si supera 39 °C, se detiene el audio y queda bloqueado hasta bajar a 36 °C.
+  if (tempActual > 39.0f) {
+    audioBloqueadoSobreTemp = true;
+    detenerAudio();
+    audioCicloIniciado = false;
+    return;
   }
 
-  if (reproduciendoAudio && ahora - inicioAudio >= DURACION_AUDIO) {
+  // Al bajar a 36 °C termina el ciclo de audio y se habilita el siguiente.
+  if (tempActual <= (SETPOINT - HIST_TEMPERATURA)) {
+    detenerAudio();
+    audioCicloIniciado = false;
+    audioBloqueadoSobreTemp = false;
+    return;
+  }
+
+  // El audio solamente funciona durante la etapa de histeresis (38 a 36 °C).
+  if (!metaAlcanzada || audioBloqueadoSobreTemp) {
+    detenerAudio();
+    return;
+  }
+
+  // Al alcanzar 38 °C comienza inmediatamente un ciclo: 30 s con audio
+  // y 30 s en silencio. El ciclo se repite mientras siga entre 36 y 39 °C.
+  
+  if (!audioCicloIniciado) {
+    inicioAudio = ahora;
+    audioCicloIniciado = true;
+  }
+
+  const unsigned long faseAudio = (ahora - inicioAudio) % REPETICION_LLAMADO;
+  const bool debeSonar = faseAudio < DURACION_AUDIO;
+
+  if (debeSonar && !reproduciendoAudio) {
+    reproduciendoAudio = true;
+    if (mp3Disponible) {
+      mp3.loop(1);
+    }
+  } else if (!debeSonar && reproduciendoAudio) {
     detenerAudio();
   }
 }
@@ -441,45 +404,61 @@ void gestionarAudio() {
 // BLOQUE 16: VENTILADOR / AGITADOR
 // -----------------------------------------------------------------------------
 // El ventilador tiene dos modos principales:
-// - Cuando la temperatura está baja: permanece encendido para mejorar la
-//   circulación y ayudar al calentamiento.
-// - Cuando la meta está alcanzada: entra en un ciclo con ON/OFF para evitar
-//   que se quede funcionando sin interrupción.
-// ============================================================================
+// - Cuando la temperatura está por debajo de 38°C: permanece encendido.
+// - Al alcanzar 38°C: inicia ciclos de 20 segundos encendido y 40 apagado.
+// - Mientras la temperatura esté entre 38°C y 36°C: continúa con los ciclos.
+// - Al llegar a 36°C: queda encendido constantemente hasta llegar a 38°C.
+// -----------------------------------------------------------------------------
 void gestionarVentilador() {
+
+  // Verificación de seguridad: si falta agua o falla el sensor,
+  // el ventilador debe permanecer apagado.
   if (!temperaturaValida || digitalRead(NIVEL_PIN) != LOW) {
     digitalWrite(RELE_VENT, RELE_OFF);
+    estadoAnteriorMeta = false;
     return;
   }
 
+  // MODO 1: Temperatura inferior a 38°C.
+  // El ventilador permanece encendido constantemente.
   if (!metaAlcanzada) {
     digitalWrite(RELE_VENT, RELE_ON);
+
+    // Se mantiene actualizado el temporizador para iniciar el ciclo
+    // desde cero cuando se alcancen nuevamente los 38°C.
     inicioVentilador = ahora;
+
+    estadoAnteriorMeta = false;
     return;
   }
 
-  unsigned long tiempoTranscurrido = ahora - inicioVentilador;
-  const unsigned long cicloTotal = VENTILADOR_ON + VENTILADOR_OFF;
+  // MODO 2: Temperatura entre 38°C y 36°C.
+  // Al alcanzar los 38°C comienza el ciclo de 20 segundos ON y 40 segundos OFF.
+  // El ciclo se repite continuamente mientras la meta permanezca alcanzada.
 
-  if (tiempoTranscurrido >= cicloTotal) {
+  // Se detecta el cambio de temperatura al estado de meta alcanzada.
+  // Se reinicia el temporizador para comenzar con 20 segundos encendido.
+  if (!estadoAnteriorMeta) {
     inicioVentilador = ahora;
-    tiempoTranscurrido = 0;
+    estadoAnteriorMeta = true;
   }
 
-  if (tiempoTranscurrido < VENTILADOR_ON) {
-    digitalWrite(RELE_VENT, RELE_ON);
-  } else {
+  const unsigned long cicloTotal = VENTILADOR_ON + VENTILADOR_OFF;
+  const unsigned long tiempoCiclo = (ahora - inicioVentilador) % cicloTotal;
+
+  // Primeros 40 segundos: ventilador apagado (al llegar a 38 °C primero para).
+  if (tiempoCiclo < VENTILADOR_OFF) {
     digitalWrite(RELE_VENT, RELE_OFF);
+  }
+  // Siguientes 20 segundos: ventilador encendido.
+  else {
+    digitalWrite(RELE_VENT, RELE_ON);
   }
 }
 
 // ============================================================================
 // BLOQUE 17: PUBLICACION DE DATOS A UBIDOTS
 // -----------------------------------------------------------------------------
-// Se envían las variables más importantes del sistema para monitoreo remoto:
-// temperatura, estado del relé, nivel del agua, validación del sensor, audio y
-// estado general del proceso.
-// ============================================================================
 void enviarDatosUbidots() {
   if (WiFi.status() != WL_CONNECTED || !ubidots.connected()) {
     return;
@@ -519,9 +498,6 @@ void enviarDatosUbidots() {
 // ============================================================================
 // BLOQUE 18: VISUALIZACION EN OLED
 // -----------------------------------------------------------------------------
-// La pantalla OLED ofrece un resumen legible del estado del sistema en una
-// pequeña resolución de 128x64, útil para validación y depuración en sitio.
-// ============================================================================
 void mostrarOLED() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tf);
