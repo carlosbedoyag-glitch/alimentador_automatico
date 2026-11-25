@@ -59,6 +59,7 @@ DallasTemperature sensors(&oneWire);
 constexpr float SETPOINT = 38.0f;
 constexpr float BANDA_PID = 0.5f;
 constexpr float HIST_TEMPERATURA = 2.0f;
+constexpr float TOLERANCIA_META = 0.1f;
 constexpr float KP = 40.0f;
 constexpr float KI = 0.2f;
 constexpr float KD = 8.0f;
@@ -81,6 +82,10 @@ bool mp3Disponible = false;
 bool audioCicloIniciado = false;
 bool audioBloqueadoSobreTemp = false;
 
+// Contador para evitar que un pico de ruido eléctrico del relé dispare
+// inmediatamente el estado de seguridad por una sola lectura fallida.
+uint8_t fallosSensorConsecutivos = 0;
+
 // ============================================================================
 // BLOQUE 6: INTERVALOS DE TIMING Y DELAY
 // -----------------------------------------------------------------------------
@@ -91,6 +96,7 @@ constexpr unsigned long DURACION_AUDIO = 30000UL;
 constexpr unsigned long INTERVALO_OLED = 250UL;
 constexpr unsigned long INTERVALO_UBIDOTS = 5000UL;
 constexpr unsigned long TIMEOUT_RECONEXION = 10000UL;
+constexpr unsigned long TIEMPO_FILTRO_NIVEL = 500UL;
 
 constexpr unsigned long VENTILADOR_ON = 20000UL;
 constexpr unsigned long VENTILADOR_OFF = 40000UL;
@@ -125,6 +131,7 @@ void procesarSeguridad();
 void enviarDatosUbidots();
 void actualizarComunicaciones();
 void detenerAudio();
+bool nivelAguaOK();
 
 // ============================================================================
 // BLOQUE 8: SETUP
@@ -183,14 +190,14 @@ void loop() {
   actualizarTemperatura();
 
   // Verificación de seguridad de nivel de agua o error en el sensor.
-  if (digitalRead(NIVEL_PIN) != LOW || !temperaturaValida) {
+  if (!nivelAguaOK() || !temperaturaValida) {
     procesarSeguridad();
     return;
   }
 
   // Histéresis: se activa al llegar a 38.0°C y permanece activa hasta bajar a
   // 36.0°C. Esto evita que el sistema oscile alrededor del punto de ajuste.
-  if (!metaAlcanzada && tempActual >= SETPOINT) {
+  if (!metaAlcanzada && tempActual >= (SETPOINT - TOLERANCIA_META)) {
     metaAlcanzada = true;
     inicioVentilador = ahora;
   } else if (metaAlcanzada && tempActual <= (SETPOINT - HIST_TEMPERATURA)) {
@@ -265,10 +272,25 @@ void actualizarTemperatura() {
   }
 
   const float leida = sensors.getTempCByIndex(0);
-  temperaturaValida = (leida != DEVICE_DISCONNECTED_C) &&
-                      (leida > -10.0f) && (leida < 85.0f);
-  if (temperaturaValida) {
+  // Se exige que la lectura sea distinta de -127°C y 85°C (error de conversión
+  // por caída de voltaje al activar relés) y se toleran hasta 2 fallos seguidos.
+  const bool lecturaActualOK = (leida != DEVICE_DISCONNECTED_C) &&
+                               (leida != 85.0f) &&
+                               (leida > -10.0f) && (leida < 85.0f);
+
+  if (lecturaActualOK) {
+    fallosSensorConsecutivos = 0;
+    temperaturaValida = true;
     tempActual = leida;
+  } else {
+    if (fallosSensorConsecutivos < 255) {
+      fallosSensorConsecutivos++;
+    }
+    if (fallosSensorConsecutivos >= 3) {
+      temperaturaValida = false;
+    }
+    Serial.printf("Advertencia DS18B20 (%.1f C) - fallo %u/3\n",
+                  leida, fallosSensorConsecutivos);
   }
   sensors.requestTemperatures();
 
@@ -277,7 +299,7 @@ void actualizarTemperatura() {
     // Por debajo de 37.5 °C se conserva el calentamiento a maxima potencia.
     // Al llegar a 38.0 °C, la histeresis apaga el calentador hasta 36.0 °C.
     if (!metaAlcanzada && tempActual >= (SETPOINT - BANDA_PID) &&
-        tempActual < SETPOINT) {
+        tempActual < (SETPOINT - TOLERANCIA_META)) {
       modoPIDActivo = true;
       calcularPID();
     } else {
@@ -329,6 +351,23 @@ void apagarActuadores() {
 // ============================================================================
 // BLOQUE 14: ESTADO DE SEGURIDAD
 // -----------------------------------------------------------------------------
+bool nivelAguaOK() {
+  static unsigned long tiempoNivelAlto = 0;
+
+  if (digitalRead(NIVEL_PIN) == LOW) {
+    tiempoNivelAlto = 0;
+    return true;
+  }
+
+  if (tiempoNivelAlto == 0) {
+    tiempoNivelAlto = ahora;
+  }
+
+  // Solo reporta nivel bajo si la señal se mantiene en HIGH más de 500 ms,
+  // evitando falsos bloqueos por oleaje o ruido electromagnético del ventilador.
+  return (ahora - tiempoNivelAlto) < TIEMPO_FILTRO_NIVEL;
+}
+
 void procesarSeguridad() {
   apagarActuadores();
   modoPIDActivo = false;
@@ -346,6 +385,7 @@ void procesarSeguridad() {
     mostrarOLED();
   }
 }
+
 // ============================================================================
 // BLOQUE 15: ALERTA SONORA
 // -----------------------------------------------------------------------------
@@ -381,7 +421,6 @@ void gestionarAudio() {
 
   // Al alcanzar 38 °C comienza inmediatamente un ciclo: 30 s con audio
   // y 30 s en silencio. El ciclo se repite mientras siga entre 36 y 39 °C.
-  
   if (!audioCicloIniciado) {
     inicioAudio = ahora;
     audioCicloIniciado = true;
@@ -413,7 +452,7 @@ void gestionarVentilador() {
 
   // Verificación de seguridad: si falta agua o falla el sensor,
   // el ventilador debe permanecer apagado.
-  if (!temperaturaValida || digitalRead(NIVEL_PIN) != LOW) {
+  if (!temperaturaValida || !nivelAguaOK()) {
     digitalWrite(RELE_VENT, RELE_OFF);
     estadoAnteriorMeta = false;
     return;
@@ -444,15 +483,18 @@ void gestionarVentilador() {
   }
 
   const unsigned long cicloTotal = VENTILADOR_ON + VENTILADOR_OFF;
+
+  // Posición dentro del ciclo de 60 s. Con módulo, una pausa del loop no
+  // reinicia el ciclo ni se pierde la ventana de encendido.
   const unsigned long tiempoCiclo = (ahora - inicioVentilador) % cicloTotal;
 
-  // Primeros 40 segundos: ventilador apagado (al llegar a 38 °C primero para).
-  if (tiempoCiclo < VENTILADOR_OFF) {
-    digitalWrite(RELE_VENT, RELE_OFF);
-  }
-  // Siguientes 20 segundos: ventilador encendido.
-  else {
+  // Primeros 20 segundos: ventilador encendido.
+  if (tiempoCiclo < VENTILADOR_ON) {
     digitalWrite(RELE_VENT, RELE_ON);
+  }
+  // Siguientes 40 segundos: ventilador apagado.
+  else {
+    digitalWrite(RELE_VENT, RELE_OFF);
   }
 }
 
@@ -464,7 +506,7 @@ void enviarDatosUbidots() {
     return;
   }
 
-  const int nivel = (digitalRead(NIVEL_PIN) == LOW) ? 1 : 0;
+  const int nivel = nivelAguaOK() ? 1 : 0;
   const int estadoCalor = (digitalRead(RELE_CALOR) == RELE_ON) ? 1 : 0;
   const int estadoVent = (digitalRead(RELE_VENT) == RELE_ON) ? 1 : 0;
   int estado = 0;
@@ -502,7 +544,7 @@ void mostrarOLED() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tf);
 
-  const bool nivelOK = digitalRead(NIVEL_PIN) == LOW;
+  const bool nivelOK = nivelAguaOK();
   const bool wifiOK = WiFi.status() == WL_CONNECTED;
   const bool ventON = digitalRead(RELE_VENT) == RELE_ON;
   const bool calorON = digitalRead(RELE_CALOR) == RELE_ON;
